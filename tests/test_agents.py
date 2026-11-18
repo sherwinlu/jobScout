@@ -4,6 +4,7 @@ import gzip
 import io
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -44,7 +45,7 @@ from jobscout.models import ApplicationDraft, Opportunity, RankedOpportunity, Re
 from jobscout.security import is_valid_ats_slug, redact_pii_for_llm
 from jobscout.orchestrator import JobScoutOrchestrator
 from jobscout.resume_loader import load_resume_text
-from jobscout.resume_tailor import tailor_resume_for_opportunity
+from jobscout.resume_tailor import _words, markdown_to_docx, tailor_resume_for_opportunity
 from jobscout.storage import Storage
 from jobscout.xml_safe import parse_xml_bytes
 
@@ -98,6 +99,22 @@ class FakeLLM(LocalLLMClient):
         if self._responses:
             return self._responses.pop(0)
         return {}
+
+
+class PickLLM(LocalLLMClient):
+    """Fake tailoring LLM: answers from a dict or a callable(user_prompt) and records every prompt."""
+
+    def __init__(self, respond) -> None:
+        super().__init__(provider="ollama", model="fake-local")
+        self._respond = respond
+        self.prompts: list[tuple[str, str]] = []
+
+    def is_available(self) -> bool:
+        return True
+
+    def chat_json(self, system_prompt: str, user_prompt: str, temperature: float = 0.1):
+        self.prompts.append((system_prompt, user_prompt))
+        return self._respond(user_prompt) if callable(self._respond) else self._respond
 
 
 class OfflineLLM(LocalLLMClient):
@@ -687,26 +704,8 @@ class JobScoutAgentsTest(unittest.TestCase):
                     "gaps": [],
                     "recommended_angle": "Lead with CareCo + ModelLabs experience.",
                 },
-                {
-                    "headline": "VP of Engineering — Clinical AI & Cloud Platforms",
-                    "summary": "Engineering leader combining HIPAA/FHIR healthcare systems with production LLM platforms.",
-                    "skills": ["HIPAA", "FHIR", "LLM Serving", "MLOps", "AWS"],
-                    "experience": [
-                        {
-                            "role": "VP of Engineering",
-                            "company": "CareCo",
-                            "dates": "2022-2026",
-                            "bullets": ["Scaled HIPAA and FHIR clinical platform on AWS."],
-                        },
-                        {
-                            "role": "Director of ML Platform",
-                            "company": "ModelLabs",
-                            "dates": "2019-2022",
-                            "bullets": ["Built production LLM serving and MLOps pipelines."],
-                        },
-                    ],
-                    "education": [],
-                },
+                # The tailoring model only picks existing lines by id (here: add the ModelLabs line).
+                {"drop": [], "highlights": ["X01"]},
                 {
                     "why_company": "Excited to lead Clinical AI at HealthAI.",
                     "relevant_experience": "Led CareCo HIPAA platform and ModelLabs LLM serving.",
@@ -1456,6 +1455,262 @@ class JobScoutAgentsTest(unittest.TestCase):
         for flagged in ("authorized to work in Canada", "country would you be working from", "Do you now require visa sponsorship"):
             self.assertTrue(any(flagged in q for q in draft.unfilled_questions), flagged)
             self.assertNotIn(flagged, filled)
+
+    @staticmethod
+    def _plain_resume(name: str, jobs: list[tuple[str, str, str, list[str]]], education: str) -> str:
+        """A resume shaped like text extracted from a .docx: caps headings, dated job lines, no bullets."""
+        out = [name.upper(), "Director of Engineering", "Oakland, CA | 555-0100 | alex@example.com", "EXECUTIVE SUMMARY",
+               "Engineering leader with 20+ years building platforms.", "PROFESSIONAL EXPERIENCE"]
+        for role, dates, employer, bullets in jobs:
+            out += [f"{role}\t{dates}", f"{employer} — SaaS | Remote", *bullets]
+        out += ["EDUCATION", education]
+        return "\n".join(out)
+
+    def test_resume_tailoring_cannot_invent_facts_or_misattribute_bullets(self) -> None:
+        import re as _re
+
+        filler = " Delivered measurable results across reliability, delivery speed, and cost." * 10
+        base_text = self._plain_resume(
+            "Alex Rivera",
+            [
+                ("CTO & Co-Founder", "June 2020 – January 2026", "CareCo, Inc.",
+                 [f"Founding CTO: built the 50-state clinical platform on a $4.4M seed round.{filler}",
+                  f"Interop: architected the HL7 and Epic integration layer.{filler}",
+                  f"Reliability: set up on-call and alerting from scratch.{filler}"]),
+                ("Principal Engineer — ML Infrastructure", "June 2020 – February 2026", "ModelLabs",
+                 [f"Architected the ML serving platform handling 60,000 requests per minute.{filler}",
+                  f"Built an LLM threat-detection pipeline on AWS Bedrock.{filler}"]),
+            ],
+            "Bachelor of Arts (B.A.), Computer Science | University of Example",
+        )
+        other_text = self._plain_resume(
+            "Alex Rivera",
+            [("VP of Engineering", "2015 – 2018", "OldCorp",
+              ["Scaled the platform engineering group and reduced provisioning time by 85%."])],
+            "Bachelor of Arts (B.A.), Computer Science | University of Example",
+        )
+        self.assertGreater(len(base_text), 3500)  # the old prompt truncated resumes at 3500 characters
+
+        def hostile(prompt: str) -> dict:
+            listed = _re.findall(r"^(L\d{3}): (.*)$", prompt, _re.M)
+            return {
+                "drop": [listed[0][0], "L000", "L001", "L003", "L999"],  # one real id + protected/unknown ids
+                "highlights": ["X01", "X99"],
+                "education": ["PhD, Computer Science, UC Berkeley"],
+                "experience": [{"company": "FakeCo", "role": "CEO", "dates": "2020-2026", "bullets": ["Invented."]}],
+                "headline": "Chief Executive Officer",
+            }
+
+        cfg = ScoutConfig(
+            home_dir=self.home / "tailor_grounded",
+            candidate=CandidateConfig(full_name="Alex Rivera"),
+            targeting=TargetingConfig(),
+            resumes=[
+                ResumeProfile(id="base", label="Base", target_roles=["director of engineering"], text=base_text),
+                ResumeProfile(id="other", label="Other", target_roles=["vp"], text=other_text),
+            ],
+        )
+        opp = Opportunity(
+            id="g:7", source="greenhouse", company="Acme", title="Director of Engineering, Platform", location="Remote",
+            url="https://x.example.org", text="Lead platform engineering, reduce provisioning time, on-call reliability.",
+        )
+        llm = PickLLM(hostile)
+        docx, md_path, md = tailor_resume_for_opportunity(opp, cfg, llm, self.home / "tailor_out")
+        prompt = llm.prompts[-1][1]
+        listed = _re.findall(r"^(L\d{3}): (.*)$", prompt, _re.M)
+
+        # Education is copied verbatim; nothing the model invented survives.
+        self.assertIn("Bachelor of Arts (B.A.), Computer Science | University of Example", md)
+        for invented in ("Berkeley", "FakeCo", "Chief Executive Officer", "Invented"):
+            self.assertNotIn(invented, md)
+        # Contact lines, employers, titles and dates are untouched even though the model tried to drop them.
+        for kept in ("Oakland, CA | 555-0100 | alex@example.com", "CareCo, Inc.", "ModelLabs",
+                     "June 2020 – January 2026", "Principal Engineer — ML Infrastructure"):
+            self.assertIn(kept, md)
+        # The one real, valid drop was honored; the other bullets stay under their own employer.
+        dropped_text = listed[0][1].rstrip("…")[:40]
+        self.assertNotIn(dropped_text, md.split("## Additional")[0])
+        careco, modellabs = md.index("CareCo, Inc."), md.index("ModelLabs —")
+        self.assertLess(careco, md.index("Interop: architected"), "bullet moved above its employer")
+        self.assertLess(md.index("Interop: architected"), modellabs)
+        self.assertGreater(md.index("Architected the ML serving platform"), modellabs)
+        # The highlight carries its own original employer header (OldCorp), never another company's.
+        tail = md.split("## Additional Relevant Highlights", 1)[1]
+        self.assertIn("OldCorp", tail)
+        self.assertIn("reduced provisioning time by 85%", tail)
+        # Prompt stays small (the Ollama default context is limited) and never contains the contact line.
+        self.assertLess(len(prompt), 12000)
+        self.assertNotIn("alex@example.com", prompt)
+        self.assertIn("University of Example", load_resume_text(docx))
+
+    def test_resume_tailoring_skips_rewordings_of_roles_in_base_and_keeps_dated_notes(self) -> None:
+        base_text = self._plain_resume(
+            "Alex Rivera",
+            [("CTO & Co-Founder", "June 2020 – January 2026", "CareCo, Inc.",
+              ["Founding CTO: built the clinical platform.",
+               "Full-time role held concurrently with part-time CTO role at CareCo (June 2020 – January 2026)."])],
+            "Bachelor of Arts (B.A.), Computer Science | University of Example",
+        )
+        reworded = self._plain_resume(
+            "Alex Rivera",
+            [("CTO & Co-Founder", "June 2020 – January 2026", "CareCo, Inc.",
+              ["Led the clinical platform build with platform engineering emphasis on reliability."])],
+            "Bachelor of Arts (B.A.), Computer Science | University of Example",
+        )
+        picks = {"drop": [], "highlights": ["X01"]}
+
+        cfg = ScoutConfig(
+            home_dir=self.home / "tailor_dedupe", candidate=CandidateConfig(full_name="Alex Rivera"), targeting=TargetingConfig(),
+            resumes=[ResumeProfile(id="b", label="B", target_roles=["cto"], text=base_text),
+                     ResumeProfile(id="o", label="O", text=reworded)],
+        )
+        opp = Opportunity(id="g:9", source="lever", company="Acme", title="CTO", location="", url="https://x.example.org",
+                          text="Lead platform engineering and reliability.")
+        _, _, md = tailor_resume_for_opportunity(opp, cfg, PickLLM(picks), self.home / "tailor_dd_out")
+        self.assertNotIn("Additional Relevant Highlights", md)  # same role/employer/year already in the base
+        self.assertNotIn("platform engineering emphasis", md)
+        # A sentence-like dated note stays verbatim as body text, not promoted to a heading.
+        self.assertIn("- Full-time role held concurrently with part-time CTO role at CareCo (June 2020 – January 2026).", md)
+        self.assertNotIn("### Full-time role", md)
+
+    def test_resume_tailoring_restores_profile_contact_when_the_resume_has_none(self) -> None:
+        placeholder = "# Your Name\n**Location:** Bay Area\n\n## Experience\n### Director — CareCo (2020-2024)\n- Led the platform team."
+        cand = CandidateConfig(full_name="Alex Rivera", email="alex@example.com", phone="555-0100", location="Oakland, CA")
+        opp = Opportunity(id="g:10", source="lever", company="Acme", title="Director", location="", url="https://x.example.org", text="Lead.")
+
+        def tailor(text: str, name: str) -> str:
+            cfg = ScoutConfig(home_dir=self.home / name, candidate=cand, targeting=TargetingConfig(),
+                              resumes=[ResumeProfile(id="b", label="B", text=text)])
+            return tailor_resume_for_opportunity(opp, cfg, PickLLM({"drop": [], "highlights": []}), self.home / f"{name}_out")[2]
+
+        md = tailor(placeholder, "tailor_contact")
+        self.assertEqual(md.splitlines()[:2], ["# Alex Rivera", "Oakland, CA | alex@example.com | 555-0100"])
+        self.assertNotIn("Your Name", md)
+        self.assertIn("Led the platform team.", md)
+        # A resume that already carries the candidate's email is left exactly as written.
+        own = "# Alex R.\nalex@example.com | Oakland\n## Experience\n### Director — CareCo (2020-2024)\n- Led the platform team."
+        self.assertTrue(tailor(own, "tailor_contact2").startswith("# Alex R.\nalex@example.com | Oakland\n"))
+
+    def test_unchanged_resume_keeps_the_original_docx_and_a_change_regenerates_it(self) -> None:
+        text = self._plain_resume(
+            "Alex Rivera",
+            [("Director of Engineering", "2019 – 2025", "CareCo, Inc.",
+              ["Led platform reliability work.", "Ran the vendor program.", "Mentored the staff."])],
+            "Bachelor of Arts (B.A.), Computer Science | University of Example",
+        )
+        original = self.home / "formatted_original.docx"
+        markdown_to_docx("# Alex Rivera\nFormatted original", original)
+        cfg = ScoutConfig(
+            home_dir=self.home / "tailor_docx", candidate=CandidateConfig(full_name="Alex Rivera"), targeting=TargetingConfig(),
+            resumes=[ResumeProfile(id="b", label="B", file_path=str(original), text=text)],
+        )
+        opp = Opportunity(id="g:11", source="lever", company="Acme", title="Director of Engineering", location="",
+                          url="https://x.example.org", text="Lead platform reliability.")
+
+        docx, _, _ = tailor_resume_for_opportunity(opp, cfg, PickLLM({"drop": [], "highlights": []}), self.home / "docx_same")
+        self.assertEqual(docx.read_bytes(), original.read_bytes())  # nothing dropped or added -> user's own file
+
+        def drop_first(prompt: str) -> dict:
+            return {"drop": [re.findall(r"^(L\d{3}):", prompt, re.M)[0]], "highlights": []}
+
+        docx, _, md = tailor_resume_for_opportunity(opp, cfg, PickLLM(drop_first), self.home / "docx_changed")
+        self.assertNotEqual(docx.read_bytes(), original.read_bytes())
+        self.assertIn("University of Example", load_resume_text(docx))
+
+    def test_all_caps_employer_line_does_not_end_the_experience_section(self) -> None:
+        text = "\n".join([
+            "ALEX RIVERA", "Director of Engineering", "Oakland, CA | alex@example.com", "PROFESSIONAL EXPERIENCE",
+            "Head of Engineering\tJanuary 2026 – July 2026", "WISP INC",
+            "Integration: led the vendor diligence.", "Operations: kept the platform running.",
+            "EDUCATION", "Bachelor of Arts (B.A.), Computer Science | University of Example",
+        ])
+        cfg = ScoutConfig(home_dir=self.home / "tailor_caps", candidate=CandidateConfig(full_name="Alex Rivera"),
+                          targeting=TargetingConfig(), resumes=[ResumeProfile(id="b", label="B", text=text)])
+        opp = Opportunity(id="g:12", source="lever", company="Acme", title="Head of Engineering", location="",
+                          url="https://x.example.org", text="Lead.")
+        llm = PickLLM({"drop": [], "highlights": []})
+        _, _, md = tailor_resume_for_opportunity(opp, cfg, llm, self.home / "tailor_caps_out")
+        prompt = llm.prompts[-1][1]
+        self.assertEqual(len(re.findall(r"^L\d{3}:", prompt, re.M)), 2)  # both detail lines are droppable candidates
+        self.assertIn("WISP INC", prompt)  # employer is the section label, not a heading
+        self.assertNotIn("## WISP INC", md)
+
+    def test_alternate_experience_headings_are_parsed_and_nothing_to_choose_skips_the_llm(self) -> None:
+        def cfg_for(name: str, heading: str | None):
+            body = ["ALEX RIVERA", "Director of Engineering", "Oakland, CA | alex@example.com"]
+            if heading:
+                body += [heading, "Head of Engineering\tJanuary 2026 – July 2026", "Wisp Inc",
+                         "Integration: led the vendor diligence.", "Operations: kept the platform running."]
+            body += ["EDUCATION", "Bachelor of Arts (B.A.), Computer Science | University of Example"]
+            return ScoutConfig(home_dir=self.home / name, candidate=CandidateConfig(full_name="Alex Rivera"),
+                               targeting=TargetingConfig(),
+                               resumes=[ResumeProfile(id="b", label="B", text="\n".join(body))])
+
+        opp = Opportunity(id="g:14", source="lever", company="Acme", title="Head of Engineering", location="",
+                          url="https://x.example.org", text="Lead.")
+        for heading in ("WORK HISTORY", "EMPLOYMENT", "PROFESSIONAL BACKGROUND", "## Work History"):
+            llm = PickLLM({"drop": [], "highlights": []})
+            tailor_resume_for_opportunity(opp, cfg_for("alt_head", heading), llm, self.home / "alt_head_out")
+            self.assertEqual(len(re.findall(r"^L\d{3}:", llm.prompts[-1][1], re.M)), 2, heading)
+        # A heading that only contains a keyword (or combines sections) is not the experience section.
+        for heading in ("EMPLOYMENT AUTHORIZATION", "EXPERIENCE & EDUCATION"):
+            llm = PickLLM({"drop": [], "highlights": []})
+            tailor_resume_for_opportunity(opp, cfg_for("auth_head", heading), llm, self.home / "auth_head_out")
+            self.assertEqual(llm.prompts, [], heading)
+        # No recognizable experience section and no other resume to borrow from: no model call at all.
+        llm = PickLLM({"drop": [], "highlights": []})
+        _, _, md = tailor_resume_for_opportunity(opp, cfg_for("no_exp", None), llm, self.home / "no_exp_out")
+        self.assertEqual(llm.prompts, [])
+        self.assertIn("University of Example", md)
+        # A single droppable line can never be dropped (budget rounds to 0), so there is nothing to ask either.
+        one = cfg_for("one_line", "WORK HISTORY")
+        one.resumes[0].text = one.resumes[0].text.replace("Operations: kept the platform running.\n", "")
+        llm = PickLLM({"drop": [], "highlights": []})
+        tailor_resume_for_opportunity(opp, one, llm, self.home / "one_line_out")
+        self.assertEqual(llm.prompts, [])
+
+    def test_prompt_lines_redact_the_candidates_own_details_and_stopwords_do_not_score(self) -> None:
+        text = self._plain_resume(
+            "Alex Rivera",
+            [("Director", "2019 – 2025", "CareCo", ["Reachable on PRIVATE-PHONE-9999 for platform escalations.",
+                                                    "Ran the platform reliability program."])],
+            "Bachelor of Arts (B.A.), Computer Science | University of Example",
+        )
+        cfg = ScoutConfig(home_dir=self.home / "tailor_pii", candidate=CandidateConfig(full_name="Alex Rivera", phone="PRIVATE-PHONE-9999"),
+                          targeting=TargetingConfig(), resumes=[ResumeProfile(id="b", label="B", text=text)])
+        opp = Opportunity(id="g:13", source="lever", company="Acme", title="Director", location="",
+                          url="https://x.example.org", text="Lead platform reliability.")
+        llm = PickLLM({"drop": [], "highlights": []})
+        tailor_resume_for_opportunity(opp, cfg, llm, self.home / "tailor_pii_out")
+        self.assertNotIn("PRIVATE-PHONE-9999", llm.prompts[-1][1])
+        self.assertEqual(_words("Lead the team with that from have platform"), {"lead", "platform"})
+
+    def test_resume_tailoring_falls_back_to_verbatim_base_when_llm_fails(self) -> None:
+        base_text = self._plain_resume(
+            "Alex Rivera",
+            [("Director of Engineering", "2019 – 2025", "CareCo", ["Led the platform team of 12 engineers."])],
+            "Bachelor of Arts (B.A.), Computer Science | University of Example",
+        )
+
+        class BrokenLLM(LocalLLMClient):
+            def __init__(inner) -> None:
+                super().__init__(provider="ollama", model="fake-local")
+
+            def is_available(inner) -> bool:
+                return True
+
+            def chat_json(inner, *a, **k):
+                raise LocalLLMError("boom")
+
+        cfg = ScoutConfig(
+            home_dir=self.home / "tailor_fallback", candidate=CandidateConfig(full_name="Alex Rivera"),
+            targeting=TargetingConfig(), resumes=[ResumeProfile(id="b", label="B", text=base_text)],
+        )
+        opp = Opportunity(id="g:8", source="lever", company="Acme", title="Director of Engineering", location="",
+                          url="https://x.example.org", text="Lead platform engineering.")
+        _, _, md = tailor_resume_for_opportunity(opp, cfg, BrokenLLM(), self.home / "tailor_fb_out")
+        for line in ("Led the platform team of 12 engineers.", "University of Example", "CareCo", "2019 – 2025"):
+            self.assertIn(line, md)
 
     def test_display_label_collapses_noisy_control_descriptors(self) -> None:
         label = ApplierAgent._display_label

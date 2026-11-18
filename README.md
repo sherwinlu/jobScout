@@ -18,7 +18,7 @@ A local-first, **four-agent** job search pipeline powered by your local LLM (**O
    Filters and scores opportunities against your `profile.json` and role-specific resumes.  
    - **Stage 1**: Deterministic title, location, exclusion, and keyword scoring configured in `profile.json` (`targeting.filters`).
    - **Stage 2**: LLM evaluation returning a 0–100 match score, verdict (`strong_match`, `good_match`, `stretch`, `skip`), strengths, gaps, and recommended positioning angle.
-   - **Custom Resume Tailoring**: For matched roles (`auto_tailor_verdicts`, defaulting to `strong_match` and `good_match`), combines facts across **all** your configured resumes into a job-specific `tailored_resume.docx` + `tailored_resume.md` (pass `--no-tailor` to skip).
+   - **Custom Resume Tailoring**: For matched roles (`auto_tailor_verdicts`, defaulting to `strong_match` and `good_match`), builds a job-specific `tailored_resume.docx` + `tailored_resume.md` from your **own** resume text: the best-matching resume is used verbatim, and the local LLM may only drop less-relevant experience lines or add a few lines from your other resumes (each with its original employer and dates). It never writes resume content, so it cannot invent a degree or move an accomplishment to another employer (pass `--no-tailor` to attach your static resume instead).
    - Selects the best-fitting resume variant per role and writes daily Markdown digests (with source attribution) to `~/job-scout/digests/YYYY-MM-DD.md`.
 
 3. **Applier Agent (`jobscout/agents/applier.py`)**  
