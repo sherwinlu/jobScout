@@ -45,6 +45,11 @@ class JobScoutOrchestrator:
         self.applier = ApplierAgent(self.config, self.storage, self._agent_llms["applier"])
         self.curator = CuratorAgent(self.config, self.storage, self._agent_llms["curator"])
 
+    @property
+    def agent_llms(self) -> dict[str, LocalLLMClient]:
+        """Return the resolved LLM client per agent."""
+        return dict(self._agent_llms)
+
     def _ensure_llms(self, *names: str) -> None:
         for client in {id(c): c for c in (self._agent_llms[n] for n in names)}.values():
             client.ensure_available()
@@ -60,7 +65,12 @@ class JobScoutOrchestrator:
         tailor_resumes: bool = True,
         curate: bool = True,
     ) -> PipelineResult:
-        self._ensure_llms("scout", "ranker", *(("curator",) if curate and self.config.curation.enabled else ()))
+        required = ["scout"]
+        if scan_boards or scan_news:
+            required.append("ranker")
+        if curate and self.config.curation.enabled:
+            required.append("curator")
+        self._ensure_llms(*required)
         report = self.scout.run(
             build=build,
             scan_boards=scan_boards,

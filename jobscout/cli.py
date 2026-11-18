@@ -143,9 +143,11 @@ def cmd_status(orch: JobScoutOrchestrator) -> int:
     if orch.llm.backups:
         chain_str = " -> ".join(f"{c.provider}({c.model})" for c in [orch.llm, *orch.llm.backups])
         print(f"LLM Chain:       {chain_str}")
-    for name, client in orch._agent_llms.items():
+    for name, client in orch.agent_llms.items():
         if client is not orch.llm:
-            print(f"LLM ({name}):".ljust(17) + f"{client.provider}({client.model})")
+            ok = client.is_available()
+            state = "yes" if ok else f"no - {client.unavailable_reason or 'unavailable'}"
+            print(f"LLM ({name}):".ljust(17) + f"{client.active_provider}({client.active_model}, available={state})")
     print(f"Playwright:      {pw_status}")
     print(f"Scout UA:        {orch.scout.http.user_agent}")
     print(f"Opportunities:   {stats['opportunities']}")

@@ -282,6 +282,8 @@ flowchart TD
   - `LLMConfig.backups` constructs an ordered client chain `[primary, backup_1, backup_2, ...]` tracked by `_active_index`.
   - **Transient errors (`_RetryableLLMError`)** — HTTP `408`, `429`, `500`, `502`, `503`, `504`, `529`, `TimeoutError`, `socket.timeout`, `ConnectionResetError`, `http.client.RemoteDisconnected` — **retry the same LLM** up to `max_retries` times (honoring `Retry-After` capped at `30s`, or `retry_backoff_seconds * 2^attempt`). If retries are exhausted, `LocalLLMError` is raised without silently switching backups.
   - **Non-retryable / down errors (`_NonRetryableLLMError`)** — `ConnectionRefusedError`, unreachable host, missing API key, missing local model, invalid/non-HTTPS `base_url`, or HTTP `400`/`401`/`403`/`404`/`422` — mark that client unavailable and immediately fail over to the next client in `backups`.
+- **Per-Agent Overrides (`LLMConfig.agents`)**: `JobScoutOrchestrator` resolves a dedicated `LocalLLMClient` for any agent (`scout`, `ranker`, `applier`, `curator`) named in `llm.agents`; agents without an override share `self.llm` (and injected `llm=` clients apply to all agents). When an override switches `provider`, `LLMConfig.for_agent()` resets `base_url`, `model`, `api_key_env`, and `backups` so local endpoints/models never leak into cloud providers (or vice versa).
+- **Ollama JSON-Format Fallback**: If an Ollama `/api/chat` call with `format="json"` fails with `"structured output is unavailable"` (e.g., MLX-backed builds), `LocalLLMClient` logs once, caches `_json_format_unsupported = True`, and retries without `format` using prompt-enforced JSON.
 
 ---
 

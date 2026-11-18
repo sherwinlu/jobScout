@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -183,6 +183,18 @@ class TargetingConfig:
         )
 
 
+_LLM_OVERRIDE_CASTS: dict[str, Any] = {
+    "base_url": str,
+    "model": str,
+    "api_key_env": str,
+    "timeout_seconds": int,
+    "max_retries": int,
+    "retry_backoff_seconds": float,
+    "backups": lambda v: [dict(b) for b in v if isinstance(b, dict)],
+}
+_OVERRIDABLE_LLM_FIELDS = frozenset(_LLM_OVERRIDE_CASTS)
+
+
 @dataclass
 class LLMConfig:
     provider: str = "ollama"
@@ -211,35 +223,52 @@ class LLMConfig:
             return self
         provider = str(override.get("provider") or self.provider)
         switched = provider.strip().lower() != self.provider.strip().lower()
-        merged: dict[str, Any] = {
-            "provider": provider,
-            "timeout_seconds": self.timeout_seconds,
-            "max_retries": self.max_retries,
-            "retry_backoff_seconds": self.retry_backoff_seconds,
-        }
-        if not switched:
-            merged.update(
-                base_url=self.base_url,
-                model=self.model,
-                api_key_env=self.api_key_env,
-                backups=self.backups,
-            )
-        merged.update({k: v for k, v in override.items() if k != "provider"})
-        merged.setdefault("backups", [])
-        return LLMConfig.from_dict(
-            {**merged, "max_news_articles_per_run": self.max_news_articles_per_run,
-             "max_ranker_evals_per_run": self.max_ranker_evals_per_run}
+        base = (
+            replace(self, base_url="", model="", api_key_env="", backups=[])
+            if switched
+            else self
         )
+        fields = {k: v for k, v in override.items() if k in _OVERRIDABLE_LLM_FIELDS}
+        return replace(base, provider=provider, agents={}, **fields)
+
+    @staticmethod
+    def _parse_agent_override(name: str, raw: Any) -> dict[str, Any]:
+        """Validate and coerce one `llm.agents` entry; reject anything we would otherwise ignore."""
+        if not isinstance(raw, dict):
+            raise ValueError(f"llm.agents.{name} must be an object, got {type(raw).__name__}")
+        unknown = sorted(set(raw) - _OVERRIDABLE_LLM_FIELDS - {"provider"})
+        if unknown:
+            raise ValueError(
+                f"llm.agents.{name} has unknown key(s) {unknown}; "
+                f"allowed: {sorted(_OVERRIDABLE_LLM_FIELDS | {'provider'})}"
+            )
+        out: dict[str, Any] = {}
+        for key, value in raw.items():
+            cast = str if key == "provider" else _LLM_OVERRIDE_CASTS[key]
+            try:
+                out[key] = cast(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"llm.agents.{name}.{key} is invalid: {exc}") from exc
+        return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LLMConfig":
         raw_backups = data.get("backups") or []
         backups = [dict(b) for b in raw_backups if isinstance(b, dict)]
-        agents = {
-            str(k): dict(v)
-            for k, v in (data.get("agents") or {}).items()
-            if k in cls.AGENT_NAMES and isinstance(v, dict)
-        }
+        raw_agents = data.get("agents")
+        agents: dict[str, dict[str, Any]] = {}
+        if isinstance(raw_agents, dict):
+            unknown = sorted(set(raw_agents) - set(cls.AGENT_NAMES))
+            if unknown:
+                raise ValueError(
+                    f"llm.agents has unknown agent name(s) {unknown}; "
+                    f"expected any of {list(cls.AGENT_NAMES)}"
+                )
+            agents = {
+                str(k): cls._parse_agent_override(str(k), v)
+                for k, v in raw_agents.items()
+                if v != {}
+            }
         return cls(
             provider=str(data.get("provider") or "ollama"),
             base_url=str(data.get("base_url") or ""),
