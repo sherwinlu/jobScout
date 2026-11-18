@@ -168,6 +168,9 @@ Configure `"backups"` in `"llm"` with an ordered list of fallback providers (as 
 }
 ```
 
+**Reasoning models (Ollama):**
+Set `"think": false` in `"llm"` to turn off a reasoning model's thinking, `true` to force it on, or omit it to keep the model's default. It is sent only to Ollama and must be a real boolean. It can also be set per agent (below). On `qwen3.8:27b-mlx`, one curator prompt took 224 s and about 11,000 tokens with thinking on, versus 33 s and about 1,000 tokens with it off; whether quality changes for the ranker is worth checking before turning it off there.
+
 **Per-agent LLMs:**
 Give an agent its own provider or model with `"agents"` in `"llm"` (agent names: `scout`, `ranker`, `applier`, `curator`). Anything you leave out is inherited from the top-level `"llm"`. If an override switches provider, the top-level `base_url`, `model`, `api_key_env` and `backups` are *not* inherited, so a local server's URL never reaches a cloud provider. Agents without an override share the top-level LLM. Unknown agent names, unknown keys, and invalid values in `"agents"` are rejected when the profile loads, so a typo can't silently route an agent to the wrong model. For example, rank locally (including ranker resume tailoring) and use a cloud model only for `applier` (which tailors the resume, writes cover letters, and drafts application answers—sending the resume text and job description to that provider):
 ```json
@@ -175,7 +178,8 @@ Give an agent its own provider or model with `"agents"` in `"llm"` (agent names:
   "provider": "ollama",
   "model": "qwen2.5:7b",
   "agents": {
-    "applier": {"provider": "gemini", "model": "gemini-2.5-flash"}
+    "applier": {"provider": "gemini", "model": "gemini-2.5-flash"},
+    "curator": {"think": false}
   }
 }
 ```

@@ -113,7 +113,9 @@ class LocalLLMClient:
         max_retries: int = 2,
         retry_backoff_seconds: float = 1.0,
         sleep_fn: Callable[[float], None] = time.sleep,
+        think: bool | None = None,
     ) -> None:
+        self.think = think
         self.provider = (provider or "ollama").strip().lower()
         defaults = _PROVIDER_DEFAULTS.get(self.provider, _PROVIDER_DEFAULTS["ollama"])
         self.base_url = (base_url or defaults["base_url"]).rstrip("/")
@@ -167,6 +169,7 @@ class LocalLLMClient:
                             else backoff
                         ),
                         sleep_fn=sleep_fn,
+                        think=b["think"] if isinstance(b.get("think"), bool) else None,
                     )
                 )
 
@@ -180,6 +183,7 @@ class LocalLLMClient:
             max_retries=max_retries,
             retry_backoff_seconds=backoff,
             sleep_fn=sleep_fn,
+            think=_get(llm_cfg, "think", None),
         )
 
     def _chain(self) -> list["LocalLLMClient"]:
@@ -404,6 +408,8 @@ class LocalLLMClient:
                 "stream": False,
                 "options": {"temperature": temperature},
             }
+            if self.think is not None:
+                payload["think"] = self.think
             if expect_json and not self._json_format_unsupported:
                 payload["format"] = "json"
             try:
