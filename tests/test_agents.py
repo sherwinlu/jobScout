@@ -1569,6 +1569,63 @@ class JobScoutAgentsTest(unittest.TestCase):
             self.assertFalse(results[name][0], name)
             self.assertEqual(results[name][1], f"https://careers.example.org/{name}", name)
 
+    @unittest.skipUnless(sync_playwright, "playwright not installed")
+    def test_applier_fills_a_div_based_ashby_application_without_a_form_element(self) -> None:
+        # Markup shaped like a live Ashby page: no <form>, fields in .ashby-application-form-container,
+        # the submit button in an ancestor, and an autocomplete whose label[for] points at no element.
+        html = """<!doctype html><html><body><div class="right-pane"><div id="form">
+          <div class="ashby-application-form-container"><div class="ashby-application-form-section-container">
+            <div class="ashby-application-form-field-entry"><label for="_systemfield_name">Legal Name</label>
+              <div><input id="_systemfield_name" name="_systemfield_name" type="text" required placeholder="Type here..."></div></div>
+            <div class="ashby-application-form-field-entry"><label for="_systemfield_email">Email</label>
+              <div><input id="_systemfield_email" name="_systemfield_email" type="email" required></div></div>
+            <div class="ashby-application-form-field-entry"><label for="phone1">Phone</label>
+              <div><input id="phone1" name="9f2" type="tel"></div></div>
+            <div class="ashby-application-form-field-entry"><label for="_systemfield_location">Where do you plan on working from?</label>
+              <div><input role="combobox" aria-autocomplete="list" placeholder="Start typing..."></div></div>
+            <div class="ashby-application-form-field-entry"><label>Resume</label>
+              <div><input type="file"></div></div>
+          </div></div>
+          <button class="ashby-application-form-submit-button"><span>Submit Application</span></button>
+        </div></div></body></html>"""
+        resume = self.home / "ashby_resume.docx"
+        resume.parent.mkdir(parents=True, exist_ok=True)
+        resume.write_bytes(b"resume")
+        cand = CandidateConfig(first_name="Alex", last_name="Rivera", full_name="Alex Rivera", email="alex@example.com", phone="555-0100")
+        cfg = ScoutConfig(home_dir=self.home / "ashby_form", candidate=cand, targeting=TargetingConfig())
+        applier = ApplierAgent(cfg, Storage(cfg), FakeLLM())
+        opp = Opportunity(id="a:1", source="ashby", company="Co", title="CTO", location="", url="https://x.example.org", text="")
+        draft = ApplicationDraft(
+            job_id="a:1", company="Co", title="CTO", url=opp.url, ats="ashby", resume_path=str(resume),
+            fields={"full_name": "Alex Rivera", "email": "alex@example.com", "phone": "555-0100"},
+        )
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                try:
+                    page = browser.new_page()
+                    page.set_content(html)
+                    app_form = applier._locate_application_form(page)
+                    submit = applier._locate_submit_button(app_form) if app_form is not None else None
+                    if app_form is not None:
+                        applier._fill_visible_form(page, app_form, opp, draft, ResumeProfile(id="r", label="R", text="r"))
+                    values = {i: page.input_value(f"#{i}") for i in ("_systemfield_name", "_systemfield_email", "phone1")}
+                    page.set_content("<!doctype html><html><body><p>nothing here</p></body></html>")
+                    nothing = applier._locate_application_form(page)
+                finally:
+                    browser.close()
+        except Exception as exc:  # no browser binary installed
+            if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc):
+                self.skipTest("chromium not installed")
+            raise
+
+        self.assertIsNotNone(app_form)
+        self.assertIsNotNone(submit)  # the button sits outside the field container but inside the located root
+        self.assertEqual(values, {"_systemfield_name": "Alex Rivera", "_systemfield_email": "alex@example.com", "phone1": "555-0100"})
+        self.assertIn("resume_upload <- ashby_resume.docx", draft.filled_inputs)
+        self.assertEqual(draft.unfilled_questions, ["Where do you plan on working from?"])  # real label, not the placeholder
+        self.assertIsNone(nothing)
+
     @staticmethod
     def _plain_resume(name: str, jobs: list[tuple[str, str, str, list[str]]], education: str) -> str:
         """A resume shaped like text extracted from a .docx: caps headings, dated job lines, no bullets."""

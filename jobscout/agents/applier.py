@@ -30,7 +30,7 @@ from jobscout.storage import log
 FIELD_MATCHERS: list[tuple[str, re.Pattern[str]]] = [
     ("first_name", re.compile(r"\b(first[\s_-]*name|given[\s_-]*name|fname)\b", re.I)),
     ("last_name", re.compile(r"\b(last[\s_-]*name|family[\s_-]*name|surname|lname)\b", re.I)),
-    ("full_name", re.compile(r"\b(full[\s_-]*name|your[\s_-]*name|^name$)\b", re.I)),
+    ("full_name", re.compile(r"\b(full[\s_-]*name|legal[\s_-]*name|your[\s_-]*name|^name$)\b", re.I)),
     ("email", re.compile(r"\b(e-?mail)\b", re.I)),
     ("phone", re.compile(r"\b(phone|mobile|telephone|cell)\b", re.I)),
     ("linkedin", re.compile(r"(linkedin)", re.I)),
@@ -85,6 +85,10 @@ def detect_ats(url: str, source: str = "") -> str:
 
 # Companies that host their own careers page embed the Greenhouse form in an iframe like this one.
 _GREENHOUSE_EMBED_SELECTOR = "iframe[src*='greenhouse.io/embed/job_app']"
+# Ashby's application is div-based (no <form>); the submit button is outside the fields' container.
+_ASHBY_FORM_CONTAINER = ".ashby-application-form-container"
+_ASHBY_SUBMIT_BUTTON = "button.ashby-application-form-submit-button"
+_ASHBY_SUBMIT_BUTTON_XPATH = "button[contains(@class, 'ashby-application-form-submit-button')]"
 # "Country of citizenship/birth" must not be answered with the country the candidate lives in.
 _COUNTRY_EXCLUDE_RE = re.compile(r"citizen|birth|nationality|origin", re.I)
 # Work authorization in the profile covers one country (the US); other countries are the reviewer's call.
@@ -635,7 +639,7 @@ class ApplierAgent(BaseAgent):
 
     @staticmethod
     def _maybe_open_apply_form(page: Any) -> None:
-        if page.locator("form input[type='email'], form input[name*='email' i]").count() > 0:
+        if page.locator(f"form input[type='email'], form input[name*='email' i], {_ASHBY_FORM_CONTAINER}").count() > 0:
             return
         candidates = [
             "a:has-text('Apply for this job')",
@@ -690,7 +694,25 @@ class ApplierAgent(BaseAgent):
                     return form
             except Exception:
                 continue
-        return None
+        return ApplierAgent._locate_formless_application(page)
+
+    @staticmethod
+    def _locate_formless_application(page: Any) -> Any | None:
+        """Locate an application that is not a <form>: Ashby renders its fields as divs.
+
+        The fields live in `.ashby-application-form-container`; the submit button is in an ancestor, so
+        return the nearest ancestor that holds both (or the container itself if it holds the button).
+        """
+        try:
+            container = page.locator(_ASHBY_FORM_CONTAINER).first
+            if container.count() == 0 or not container.is_visible():
+                return None
+            if container.locator(_ASHBY_SUBMIT_BUTTON).count() > 0:
+                return container
+            root = container.locator(f"xpath=ancestor::*[.//{_ASHBY_SUBMIT_BUTTON_XPATH}][1]").first
+            return root if root.count() > 0 else container
+        except Exception:
+            return None
 
     @staticmethod
     def _is_control_required(el: Any, descriptor: str) -> bool:
@@ -1096,7 +1118,7 @@ class ApplierAgent(BaseAgent):
                     }
                     const parentLabel = e.closest('label');
                     if (parentLabel) parts.push(parentLabel.innerText);
-                    const fieldWrap = e.closest('.field, .application-question, [data-field]');
+                    const fieldWrap = e.closest('.field, .application-question, .ashby-application-form-field-entry, [data-field]');
                     if (fieldWrap) {
                         const lbl = fieldWrap.querySelector('label, .label, .application-label');
                         if (lbl) parts.push(lbl.innerText);
