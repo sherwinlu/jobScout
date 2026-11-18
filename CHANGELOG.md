@@ -20,3 +20,4 @@ First public pre-release (alpha). The internal `2.0.0` numbering was reset becau
 
 ### Fixed
 - `candidate.eeo_defaults` in `profile.json` was previously parsed by nothing; it is now honored.
+- `ApplierAgent` review output now shows each form control by its on-page label (no repeated label/name/id noise), and EEO notes are keyed per control, so a filled Race dropdown is no longer reported as blank because of an empty free-text Ethnicity box.

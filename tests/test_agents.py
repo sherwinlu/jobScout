@@ -1097,6 +1097,14 @@ class JobScoutAgentsTest(unittest.TestCase):
         self.assertIsNone(choose_eeo_option(["Asian", "Asian American"], wanted="Asian American Pacific"))
         self.assertIsNone(choose_eeo_option(["", "Male", "Female"], wanted="---"))
 
+    def test_display_label_collapses_noisy_control_descriptors(self) -> None:
+        label = ApplierAgent._display_label
+        self.assertEqual(label("First Name * | First Name * | job_application[first_name] | "), "First Name")
+        self.assertEqual(label("Why do you want to work here? | q_why | q_why", 120), "Why do you want to work here?")
+        self.assertEqual(label(" | Email | email"), "Email")  # empty leading part is skipped
+        self.assertEqual(label("x" * 100, 10), "x" * 10)
+        self.assertEqual(label(""), "")
+
     def test_eeo_questions_are_never_sent_to_the_llm_or_persisted_in_db(self) -> None:
         llm = FakeLLM(responses=[{"answer": "Female"}])
         applier = ApplierAgent(self.config, self.storage, llm)
@@ -1193,8 +1201,10 @@ class JobScoutAgentsTest(unittest.TestCase):
             c[key].check.assert_not_called()
         self.assertEqual(llm.prompts, [])
         flagged = " | ".join(draft.unfilled_questions)
-        for label in ("gender", "veteran status", "disability status", "race ethnicity"):
-            self.assertIn(f"[EEO] {label}", flagged)
+        # Each control is flagged under its own on-page label, so a free-text "Ethnicity" box is not
+        # confused with a filled Race dropdown.
+        for label in ("Gender", "Veteran Status", "Disability Status", "Race", "Ethnicity (optional)"):
+            self.assertIn(f"[EEO] {label}: left blank", flagged)
         self.assertNotIn("hear about", flagged)  # non-EEO selects are untouched and unflagged
 
         # decline_to_self_identify + one explicit answer.
@@ -1209,10 +1219,11 @@ class JobScoutAgentsTest(unittest.TestCase):
         c["cb_race"].check.assert_not_called()  # checkboxes are never ticked
         c["r_other"].check.assert_not_called()
         c["eeo_text"].fill.assert_not_called()  # free text only from an explicit non-decline value
-        self.assertIn("[EEO] gender <- Decline to self-identify", draft.filled_inputs)
-        self.assertIn("[EEO] veteran status <- I am not a protected veteran", draft.filled_inputs)
-        self.assertIn("[EEO] disability status <- I do not want to answer", draft.filled_inputs)
-        self.assertTrue(any(q.startswith("[EEO] race") for q in draft.unfilled_questions))
+        self.assertIn("[EEO] Gender <- Decline to self-identify", draft.filled_inputs)
+        self.assertIn("[EEO] Veteran Status <- I am not a protected veteran", draft.filled_inputs)
+        self.assertIn("[EEO] Disability Status <- I do not want to answer", draft.filled_inputs)
+        self.assertTrue(any(q.startswith("[EEO] Race:") for q in draft.unfilled_questions))
+        self.assertTrue(any(q.startswith("[EEO] Ethnicity (optional):") for q in draft.unfilled_questions))
 
     def test_offline_llm_aborts_jobs_and_cli_exits_nonzero(self) -> None:
         opp = Opportunity(

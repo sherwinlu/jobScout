@@ -666,7 +666,7 @@ class ApplierAgent(BaseAgent):
                     if draft.cover_letter_required or self._is_control_required(el, descriptor):
                         _, letter_text = self._ensure_custom_cover_letter(opp, draft, resume)
                         el.fill(letter_text)
-                        draft.filled_inputs.append(f"{descriptor[:60]} <- {letter_text}")
+                        draft.filled_inputs.append(f"{self._display_label(descriptor, 60)} <- {letter_text}")
                     continue
                 eeo_category = match_eeo_category(descriptor)
                 if eeo_category:
@@ -685,11 +685,11 @@ class ApplierAgent(BaseAgent):
 
                 if value:
                     el.fill(value)
-                    label = descriptor[:60] or key or "field"
+                    label = self._display_label(descriptor, 60) or key or "field"
                     # Show full value (never truncate) so reviewer sees everything before submit.
                     draft.filled_inputs.append(f"{label} <- {value}")
                 elif descriptor:
-                    draft.unfilled_questions.append(descriptor[:120])
+                    draft.unfilled_questions.append(self._display_label(descriptor, 120))
             except Exception:
                 continue
 
@@ -700,8 +700,20 @@ class ApplierAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _eeo_label(category: str, descriptor: str) -> str:
-        return descriptor[:60] if category == EEO_OTHER else category.replace("_", " ")
+    def _display_label(descriptor: str, max_len: int = 80) -> str:
+        """Human-readable control label: the first descriptor part, minus duplicates and required `*` markers.
+
+        `_describe_control` joins label text, aria-label, placeholder, name, and id with " | ", which is
+        useful for matching but noisy (and repeats the label) when shown in the review prompt.
+        """
+        for part in (descriptor or "").split(" | "):
+            label = re.sub(r"\s*\*+\s*$", "", part.strip()).strip()
+            if label:
+                return label[:max_len]
+        return ""
+
+    def _eeo_label(self, category: str, descriptor: str) -> str:
+        return self._display_label(descriptor, 60) or category.replace("_", " ")
 
     def _flag_eeo(self, draft: ApplicationDraft, category: str, descriptor: str) -> None:
         label = self._eeo_label(category, descriptor)
@@ -755,7 +767,16 @@ class ApplierAgent(BaseAgent):
                 if not category:
                     continue
                 key = info.get("name") or group_text
-                grp = groups.setdefault(key, {"category": category, "text": group_text, "els": [], "options": [], "radio": True})
+                grp = groups.setdefault(
+                    key,
+                    {
+                        "category": category,
+                        "label": info.get("group") or info.get("name", ""),
+                        "els": [],
+                        "options": [],
+                        "radio": True,
+                    },
+                )
                 grp["els"].append(el)
                 grp["options"].append(str(info.get("option", "")).strip())
                 grp["radio"] = grp["radio"] and info.get("type") == "radio"
@@ -767,11 +788,11 @@ class ApplierAgent(BaseAgent):
                 # Checkboxes are never ticked automatically; only single-choice radio groups are.
                 pick = self._pick_eeo_option(grp["category"], grp["options"]) if grp["radio"] else None
                 if pick is None:
-                    self._flag_eeo(draft, grp["category"], grp["text"])
+                    self._flag_eeo(draft, grp["category"], grp["label"])
                     continue
                 grp["els"][pick].check()
                 draft.filled_inputs.append(
-                    f"[EEO] {self._eeo_label(grp['category'], grp['text'])} <- {grp['options'][pick]}"
+                    f"[EEO] {self._eeo_label(grp['category'], grp['label'])} <- {grp['options'][pick]}"
                 )
             except Exception:
                 continue
