@@ -2952,6 +2952,82 @@ class JobScoutAgentsTest(unittest.TestCase):
             rc = cli_main(["--home", str(cfg.home_dir), "--profile", str(prof_path), "curate", "--no-discover"])
             self.assertEqual(rc, 0)
 
+    def test_agent_llm_override_inherits_or_isolates_by_provider(self) -> None:
+        cfg = LLMConfig.from_dict(
+            {
+                "provider": "ollama",
+                "base_url": "http://localhost:11434",
+                "model": "qwen2.5:14b",
+                "backups": [{"provider": "claude", "model": "claude-sonnet-4-20250514"}],
+                "agents": {
+                    "ranker": {"model": "qwen2.5:32b"},
+                    "applier": {"provider": "gemini", "model": "gemini-2.5-flash"},
+                    "bogus": {"model": "x"},
+                },
+            }
+        )
+        self.assertEqual(set(cfg.agents), {"ranker", "applier"})
+        self.assertIs(cfg.for_agent("curator"), cfg)
+
+        ranker = cfg.for_agent("ranker")
+        self.assertEqual(
+            (ranker.provider, ranker.base_url, ranker.model, len(ranker.backups)),
+            ("ollama", "http://localhost:11434", "qwen2.5:32b", 1),
+        )
+
+        applier = cfg.for_agent("applier")
+        self.assertEqual((applier.provider, applier.base_url, applier.model), ("gemini", "", "gemini-2.5-flash"))
+        self.assertEqual(applier.backups, [])
+
+    def test_orchestrator_gives_overridden_agents_their_own_llm(self) -> None:
+        self.config.llm = LLMConfig.from_dict(
+            {
+                "provider": "ollama",
+                "model": "qwen2.5:14b",
+                "agents": {"applier": {"provider": "gemini", "model": "gemini-2.5-flash"}},
+            }
+        )
+        orch = JobScoutOrchestrator(config=self.config, storage=self.storage)
+        self.assertIs(orch.ranker.llm, orch.llm)
+        self.assertIsNot(orch.applier.llm, orch.llm)
+        self.assertEqual((orch.applier.llm.provider, orch.applier.llm.model), ("gemini", "gemini-2.5-flash"))
+
+        injected = JobScoutOrchestrator(config=self.config, storage=self.storage, llm=OfflineLLM())
+        self.assertIs(injected.applier.llm, injected.llm)
+
+    def test_ollama_retries_without_json_format_when_server_rejects_it(self) -> None:
+        bodies: list[dict] = []
+
+        class Resp:
+            def __init__(self, payload: dict) -> None:
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self, *_: object) -> bytes:
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def urlopen(req, timeout=60):
+            if req.full_url.endswith("/api/tags"):
+                return Resp({"models": [{"name": "m"}]})
+            body = json.loads(req.data)
+            bodies.append(body)
+            if "format" in body:
+                raise urllib.error.HTTPError(
+                    req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error":"structured output is unavailable"}')
+                )
+            return Resp({"message": {"content": '{"ok": true}'}})
+
+        client = LocalLLMClient(provider="ollama", model="m")
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            self.assertEqual(client.chat_json("sys", "usr"), {"ok": True})
+            self.assertEqual(client.chat_json("sys", "usr"), {"ok": True})
+        self.assertEqual(["format" in b for b in bodies], [True, False, False])
+
 
 if __name__ == "__main__":
     unittest.main()

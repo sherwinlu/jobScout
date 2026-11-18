@@ -168,6 +168,19 @@ Configure `"backups"` in `"llm"` with an ordered list of fallback providers (as 
 }
 ```
 
+**Per-agent LLMs:**
+Give an agent its own provider or model with `"agents"` in `"llm"` (agent names: `scout`, `ranker`, `applier`, `curator`). Anything you leave out is inherited from the top-level `"llm"`. If an override switches provider, the top-level `base_url`, `model`, `api_key_env` and `backups` are *not* inherited, so a local server's URL never reaches a cloud provider. Agents without an override share the top-level LLM. For example, rank locally and use a cloud model only to draft application answers (resume text and job descriptions are sent to that provider):
+```json
+"llm": {
+  "provider": "ollama",
+  "model": "qwen2.5:14b",
+  "agents": {
+    "applier": {"provider": "gemini", "model": "gemini-2.5-flash"}
+  }
+}
+```
+`--llm-provider`, `--llm-model` and `--llm-base-url` change only the top-level LLM, not per-agent overrides.
+
 ---
 
 ## Usage

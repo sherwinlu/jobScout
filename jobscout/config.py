@@ -195,11 +195,51 @@ class LLMConfig:
     max_news_articles_per_run: int = 25
     max_ranker_evals_per_run: int = 30
     backups: list[dict[str, Any]] = field(default_factory=list)
+    agents: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    AGENT_NAMES = ("scout", "ranker", "applier", "curator")
+
+    def for_agent(self, name: str) -> "LLMConfig":
+        """Return this config with the agent's `agents[name]` override applied.
+
+        Fields not named in the override are inherited. When the override switches
+        provider, base_url/model/api_key_env and backups are not inherited, so a local
+        primary never leaks its URL or model name into a cloud provider (or the reverse).
+        """
+        override = self.agents.get(name)
+        if not override:
+            return self
+        provider = str(override.get("provider") or self.provider)
+        switched = provider.strip().lower() != self.provider.strip().lower()
+        merged: dict[str, Any] = {
+            "provider": provider,
+            "timeout_seconds": self.timeout_seconds,
+            "max_retries": self.max_retries,
+            "retry_backoff_seconds": self.retry_backoff_seconds,
+        }
+        if not switched:
+            merged.update(
+                base_url=self.base_url,
+                model=self.model,
+                api_key_env=self.api_key_env,
+                backups=self.backups,
+            )
+        merged.update({k: v for k, v in override.items() if k != "provider"})
+        merged.setdefault("backups", [])
+        return LLMConfig.from_dict(
+            {**merged, "max_news_articles_per_run": self.max_news_articles_per_run,
+             "max_ranker_evals_per_run": self.max_ranker_evals_per_run}
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LLMConfig":
         raw_backups = data.get("backups") or []
         backups = [dict(b) for b in raw_backups if isinstance(b, dict)]
+        agents = {
+            str(k): dict(v)
+            for k, v in (data.get("agents") or {}).items()
+            if k in cls.AGENT_NAMES and isinstance(v, dict)
+        }
         return cls(
             provider=str(data.get("provider") or "ollama"),
             base_url=str(data.get("base_url") or ""),
@@ -211,6 +251,7 @@ class LLMConfig:
             max_news_articles_per_run=int(data.get("max_news_articles_per_run", 25)),
             max_ranker_evals_per_run=int(data.get("max_ranker_evals_per_run", 30)),
             backups=backups,
+            agents=agents,
         )
 
 
