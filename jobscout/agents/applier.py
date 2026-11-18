@@ -83,6 +83,8 @@ def detect_ats(url: str, source: str = "") -> str:
     return "generic"
 
 
+# Companies that host their own careers page embed the Greenhouse form in an iframe like this one.
+_GREENHOUSE_EMBED_SELECTOR = "iframe[src*='greenhouse.io/embed/job_app']"
 # "Country of citizenship/birth" must not be answered with the country the candidate lives in.
 _COUNTRY_EXCLUDE_RE = re.compile(r"citizen|birth|nationality|origin", re.I)
 # Work authorization in the profile covers one country (the US); other countries are the reviewer's call.
@@ -501,6 +503,7 @@ class ApplierAgent(BaseAgent):
 
             self._maybe_open_apply_form(page)
             page.wait_for_timeout(1000)
+            self._follow_greenhouse_embed(page)
 
             submit_btn = None
             nav_err = self._validate_landed_url(page)
@@ -602,6 +605,33 @@ class ApplierAgent(BaseAgent):
         ):
             return "insecure HTTP form action on HTTPS page"
         return None
+
+    @staticmethod
+    def _follow_greenhouse_embed(page: Any, wait_ms: int = 4000) -> bool:
+        """Open a Greenhouse application form that a company's own careers page embeds in an iframe.
+
+        The form locator only searches the page it is given, so a form inside an iframe is invisible to
+        it and nothing gets filled. The iframe's own URL (HTTPS, a greenhouse.io host, public) is the
+        same form served top-level, so navigate there. Returns True if it navigated.
+        """
+        try:
+            if page.locator("form#application-form, form#application_form").count() > 0:
+                return False
+            frame_el = page.locator(_GREENHOUSE_EMBED_SELECTOR).first
+            frame_el.wait_for(state="attached", timeout=wait_ms)
+            target = urllib.parse.urljoin(str(page.url), str(frame_el.get_attribute("src") or "").strip())
+            parsed = urllib.parse.urlsplit(target)
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme != "https" or not (host == "greenhouse.io" or host.endswith(".greenhouse.io")):
+                return False
+            if validate_public_url(target) is not None:
+                return False
+            page.goto(target, wait_until="domcontentloaded")
+            page.wait_for_timeout(1500)
+        except Exception:
+            return False
+        log(f"applier: following the embedded Greenhouse application form ({host})")
+        return True
 
     @staticmethod
     def _maybe_open_apply_form(page: Any) -> None:
