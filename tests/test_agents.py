@@ -17,6 +17,7 @@ from job_scout import main as cli_main
 from jobscout.agents.applier import (
     ApplierAgent,
     choose_eeo_option,
+    choose_option,
     detect_ats,
     match_eeo_category,
     match_field_key,
@@ -47,6 +48,11 @@ from jobscout.resume_tailor import tailor_resume_for_opportunity
 from jobscout.storage import Storage
 from jobscout.xml_safe import parse_xml_bytes
 
+
+try:  # optional: only the real-browser test needs it
+    from playwright.sync_api import sync_playwright
+except ImportError:  # pragma: no cover
+    sync_playwright = None
 
 SAMPLE_RSS = b"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -1142,6 +1148,314 @@ class JobScoutAgentsTest(unittest.TestCase):
         self.assertEqual(calls_before_all, 3)
         self.assertEqual(len({r.opportunity.id for r in first + second}), 3)
         self.assertGreater(len(llm.prompts), calls_before_all)  # --all re-evaluates ranked jobs
+
+    def test_sponsorship_question_is_not_mistaken_for_location_and_hispanic_is_its_own_category(self) -> None:
+        sponsor = "Will you now or in the future require sponsorship for a visa to remain in your current location?"
+        self.assertEqual(match_field_key(sponsor), "require_sponsorship")
+        self.assertEqual(match_field_key("What is your current country of residence?"), "country")
+        self.assertEqual(match_field_key("Current location"), "location")
+        label = "Are you Hispanic/Latino? | Are you Hispanic/Latino? | hispanic_ethnicity"
+        self.assertEqual(match_eeo_category(label), "hispanic_latino")
+        self.assertEqual(match_eeo_category("Race | race"), "race_ethnicity")
+        self.assertEqual(match_eeo_category("Ethnicity (optional)"), "race_ethnicity")
+        self.assertEqual(choose_option(["Yes", "No", "Decline"], "No"), 1)
+        self.assertEqual(choose_option(["Canada", "United States"], "United States"), 1)
+        self.assertIsNone(choose_option(["Yes", "No"], "Maybe"))
+        self.assertIsNone(choose_option(["Yes", "No"], ""))
+
+    def test_applier_selects_real_combobox_options_and_never_types_into_them(self) -> None:
+        def combo(desc: str, lb: str, options: list[str], shown: str, on_pick=None) -> MagicMock:
+            el = MagicMock(desc=desc, options=options, lb=lb)
+            el.is_visible.return_value = True
+            el.evaluate.side_effect = lambda js, *a: "input" if "tagName" in js else shown
+            attrs = {"type": "text", "role": "combobox", "aria-controls": lb, "id": lb}
+            el.get_attribute.side_effect = lambda a: attrs.get(a)
+            el.on_pick = on_pick
+            return el
+
+        def build(candidate: CandidateConfig, fields: dict[str, str]):
+            cfg = ScoutConfig(home_dir=self.home / "combobox_form", candidate=candidate, targeting=TargetingConfig())
+            applier = ApplierAgent(cfg, Storage(cfg), FakeLLM())
+            controls: list[MagicMock] = []
+            race = combo("Race", "race_lb", ["Asian", "White", "Decline"], "Asian")
+            hisp = combo("Are you Hispanic/Latino?", "hisp_lb", ["Yes", "No", "Decline"], "No",
+                         on_pick=lambda: controls.append(race))  # answering reveals a Race question
+            gender = combo("Gender", "gender_lb", ["Male", "Female", "Decline to self-identify"], "Male")
+            sponsor = combo(
+                "Will you now or in the future require sponsorship for a visa to remain in your current location?",
+                "spons_lb", ["Yes", "No"], "No",
+            )
+            prior = combo("Have you previously worked at GitLab?", "prior_lb", ["Yes", "No"], "")
+            vet = combo("Veteran Status", "vet_lb", ["Not a protected veteran", "Protected veteran"], "Select...")
+            controls.extend([gender, hisp, sponsor, prior, vet])
+
+            def option_loc(el: MagicMock) -> MagicMock:
+                loc = MagicMock()
+                loc.all_inner_texts.return_value = el.options
+                def nth(i: int) -> MagicMock:
+                    opt = MagicMock()
+                    opt.click.side_effect = lambda: el.on_pick() if el.on_pick else None
+                    return opt
+                loc.nth.side_effect = nth
+                return loc
+
+            by_lb = {c.lb: option_loc(c) for c in (race, hisp, gender, sponsor, prior, vet)}
+
+            def page_locator(sel: str) -> MagicMock:
+                for lb, loc in by_lb.items():
+                    if f'[id="{lb}"]' in sel:
+                        return loc
+                raise AssertionError(sel)
+
+            page = MagicMock()
+            page.locator.side_effect = page_locator
+            empty = MagicMock()
+            empty.count.return_value = 0
+            ctl = MagicMock()
+            ctl.count.side_effect = lambda: len(controls)
+            ctl.nth.side_effect = lambda i: controls[i]
+            form = MagicMock()
+            form.locator.side_effect = lambda sel: ctl if sel == "input, textarea" else empty
+            opp = Opportunity(id="g:1", source="greenhouse", company="Co", title="VP", location="", url="https://x.example.org", text="")
+            draft = ApplicationDraft(job_id="g:1", company="Co", title="VP", url=opp.url, ats="greenhouse", fields=fields)
+            with patch.object(applier, "_describe_control", side_effect=lambda el: el.desc):
+                applier._fill_visible_form(page, form, opp, draft, ResumeProfile(id="r", label="R"))
+            return draft, {"race": race, "hisp": hisp, "gender": gender, "sponsor": sponsor, "prior": prior, "vet": vet}
+
+        cand = CandidateConfig(eeo={"gender": "Male", "hispanic_latino": "No", "race_ethnicity": "Asian",
+                                    "veteran_status": "Not a protected veteran"})
+        draft, c = build(cand, {"require_sponsorship": "No", "location": "Oakland, CA"})
+
+        for el in c.values():
+            el.fill.assert_not_called()  # typing never commits a combobox selection
+        filled = draft.filled_inputs
+        self.assertIn("[EEO] Gender <- Male", filled)
+        self.assertIn("[EEO] Are you Hispanic/Latino? <- No", filled)
+        self.assertIn("[EEO] Race <- Asian", filled)  # revealed by the first answer, found on the second pass
+        self.assertTrue(any(f.startswith("Will you now or in the future require sponsorship") and f.endswith("<- No") for f in filled))
+        self.assertFalse(any("Oakland" in f for f in filled))
+        self.assertEqual(c["gender"].click.call_count, 1)  # the second pass does not redo handled controls
+        # No profile answer -> opened nothing, flagged. Selection that did not stick -> flagged, not "filled".
+        c["prior"].click.assert_not_called()
+        self.assertIn("Have you previously worked at GitLab?", draft.unfilled_questions)
+        self.assertFalse(any("Veteran" in f for f in filled))
+        self.assertTrue(any(q.startswith("[EEO] Veteran Status:") for q in draft.unfilled_questions))
+
+    @staticmethod
+    def _mock_combobox(desc, lb, options, shown, *, on_pick=None, click_raises=False, with_id=True):
+        el = MagicMock(desc=desc, options=options, lb=lb, on_pick=on_pick, click_raises=click_raises)
+        el.is_visible.return_value = True
+        el.evaluate.side_effect = lambda js, *a: "input" if "tagName" in js else shown
+        attrs = {"type": "text", "role": "combobox", "aria-controls": lb, "id": lb if with_id else None}
+        el.get_attribute.side_effect = lambda a: attrs.get(a)
+        return el
+
+    def _fill_mock_form(self, candidate, fields, controls):
+        """Run ApplierAgent._fill_visible_form over mock comboboxes; returns (draft, page)."""
+        cfg = ScoutConfig(home_dir=self.home / "mock_form", candidate=candidate, targeting=TargetingConfig())
+        applier = ApplierAgent(cfg, Storage(cfg), FakeLLM())
+
+        def option_loc(el):
+            loc = MagicMock()
+            loc.all_inner_texts.return_value = el.options
+
+            def nth(i):
+                opt = MagicMock()
+                if el.click_raises:
+                    opt.click.side_effect = RuntimeError("detached")
+                else:
+                    opt.click.side_effect = lambda: el.on_pick() if el.on_pick else None
+                return opt
+
+            loc.nth.side_effect = nth
+            return loc
+
+        by_lb = {c.lb: option_loc(c) for c in controls}
+        page = MagicMock()
+        page.locator.side_effect = lambda sel: next(loc for lb, loc in by_lb.items() if f'[id="{lb}"]' in sel)
+        empty = MagicMock()
+        empty.count.return_value = 0
+        ctl = MagicMock()
+        ctl.count.side_effect = lambda: len(controls)
+        ctl.nth.side_effect = lambda i: controls[i]
+        form = MagicMock()
+        form.locator.side_effect = lambda sel: ctl if sel == "input, textarea" else empty
+        opp = Opportunity(id="g:1", source="greenhouse", company="Co", title="VP", location="", url="https://x.example.org", text="")
+        draft = ApplicationDraft(job_id="g:1", company="Co", title="VP", url=opp.url, ats="greenhouse", fields=fields)
+        with patch.object(applier, "_describe_control", side_effect=lambda el: el.desc):
+            applier._fill_visible_form(page, form, opp, draft, ResumeProfile(id="r", label="R"))
+        return draft, page
+
+    def test_authorization_is_scoped_to_the_profile_country_and_country_skips_citizenship(self) -> None:
+        self.assertEqual(
+            match_field_key("Are you legally authorized to work in the United States without sponsorship?"),
+            "work_authorization",
+        )
+        self.assertEqual(
+            match_field_key("Are you authorized to work in the US and not require visa sponsorship?"), "work_authorization"
+        )
+        self.assertIsNone(match_field_key("Country of citizenship"))
+        self.assertIsNone(match_field_key("Country of birth"))
+        draft = ApplicationDraft(job_id="x", company="c", title="t", url="u", ats="g",
+                                 fields={"work_authorization": "Authorized to work in the US", "require_sponsorship": "No"})
+        wanted = ApplierAgent._combobox_wanted
+        self.assertEqual(wanted("work_authorization", draft, "Are you authorized to work in the US?"), "Yes")
+        self.assertEqual(wanted("work_authorization", draft, "Are you authorized to work in the U.S.?"), "Yes")
+        self.assertEqual(wanted("work_authorization", draft, "Are you legally authorized to work in Canada? Tell us."), "")
+        self.assertEqual(wanted("work_authorization", draft, "Authorized to work in the country of this role?"), "")
+        # US-only authorization can't answer a question that also covers other regions, listed or not.
+        cases = [
+            ("Are you authorized to work in the US or Canada?", ""),
+            ("Authorized to work in the US, UK or EU?", ""),
+            ("Are you authorized to work in the US or Colombia?", ""),
+            ("Authorized to work in the United States and Peru?", ""),
+            ("Are you authorized to work in the US as well as Canada?", ""),
+            ("Are you authorized to work in the US (or Canada)?", ""),
+            ("Are you authorized to work in the US; Canada?", ""),
+            ("Are you authorized to work in the US/Canada?", ""),
+            ("Are you authorized to work in the US & Canada?", ""),
+            ("Are you authorized to work in the US? We have offices in India.", "Yes"),
+            ("Are you eligible to work in the U.S. now or in the future?", "Yes"),
+            ("Are you authorized to work in the United States (including remote)?", "Yes"),
+            ("Are you legally authorized to work in the United States of America without sponsorship?", "Yes"),
+            ("Are you authorized to work in the US and not require visa sponsorship?", "Yes"),
+            ("Authorized to work in us", ""),  # lowercase "us" is the pronoun, not the country
+        ]
+        for question, want in cases:
+            with self.subTest(question=question):
+                self.assertEqual(wanted("work_authorization", draft, question), want)
+        self.assertEqual(wanted("require_sponsorship", draft, "Will you require sponsorship?"), "No")
+
+    def test_listbox_id_from_the_page_is_quoted_and_unscoped_options_must_be_visible(self) -> None:
+        agent = ApplierAgent.__new__(ApplierAgent)
+        el = MagicMock()
+        el.get_attribute.return_value = "weird'id]"
+        page = MagicMock()
+        agent._select_combobox_option(page, el, None, "")
+        self.assertEqual(page.locator.call_args[0][0], '[id="weird\'id]"] [role=\'option\']')
+        el.get_attribute.return_value = "lb-é"  # CSS does not read JSON's \\u00e9 escapes
+        agent._select_combobox_option(page, el, None, "")
+        self.assertEqual(page.locator.call_args[0][0], '[id="lb-é"] [role=\'option\']')
+        el.get_attribute.return_value = ""
+        agent._select_combobox_option(page, el, None, "")
+        self.assertEqual(page.locator.call_args[0][0], "[role='option']:visible")
+
+    def test_combobox_selection_must_match_exactly_and_failures_are_flagged_and_dismissed(self) -> None:
+        cand = CandidateConfig()
+        fields = {"require_sponsorship": "No"}
+        sponsor = "Will you now or in the future require sponsorship for a visa?"
+        # 1. The control shows a different value ("Not applicable") that merely contains "no": not a match.
+        stale = self._mock_combobox(sponsor, "stale_lb", ["No", "Yes"], "Not applicable")
+        draft, page = self._fill_mock_form(cand, fields, [stale])
+        self.assertEqual(draft.filled_inputs, [])
+        self.assertEqual(draft.unfilled_questions, [sponsor])
+        page.keyboard.press.assert_called_with("Escape")
+        # 2. Clicking the option raises: flagged (not silently skipped), menu dismissed, nothing recorded.
+        broken = self._mock_combobox(sponsor, "broken_lb", ["No", "Yes"], "No", click_raises=True)
+        draft, page = self._fill_mock_form(cand, fields, [broken])
+        self.assertEqual(draft.filled_inputs, [])
+        self.assertEqual(draft.unfilled_questions, [sponsor])
+        page.keyboard.press.assert_called_with("Escape")
+        # 3. Two id-less controls with the same label are both processed (neither is mistaken for "handled").
+        a = self._mock_combobox(sponsor, "a_lb", ["No", "Yes"], "No", with_id=False)
+        b = self._mock_combobox(sponsor, "b_lb", ["No", "Yes"], "No", with_id=False)
+        draft, _ = self._fill_mock_form(cand, fields, [a, b])
+        self.assertEqual(len(draft.filled_inputs), 2)
+        self.assertEqual((a.click.call_count, b.click.call_count), (1, 1))
+
+    @unittest.skipUnless(sync_playwright, "playwright not installed")
+    def test_applier_fills_react_select_style_comboboxes_in_a_real_browser(self) -> None:
+        fields_js = json.dumps(
+            [
+                {"id": "gender", "label": "Gender", "opts": ["Male", "Female", "Decline To Self Identify"], "mode": "commit"},
+                {"id": "auth_us", "label": "Are you legally authorized to work in the United States without sponsorship?",
+                 "opts": ["Yes", "No"], "mode": "commit"},
+                {"id": "auth_ca", "label": "Are you legally authorized to work in Canada?", "opts": ["Yes", "No"], "mode": "commit"},
+                {"id": "spons", "label": "Will you now or in the future require sponsorship for a visa to remain in your current location?",
+                 "opts": ["No", "Yes, H-1B"], "mode": "commit"},
+                {"id": "ignores", "label": "If offered the role, what country would you be working from?",
+                 "opts": ["United States", "Canada"], "mode": "ignore"},
+                {"id": "stale", "label": "Do you now require visa sponsorship?", "opts": ["No", "Yes"], "mode": "stale"},
+            ]
+        )
+        html = """<!doctype html><html><body><form id="application_form">
+          <div class="field-wrapper"><label for="first_name">First Name*</label><input id="first_name" type="text"></div>
+          </form>
+          <!-- decoy: a page-wide [role=option] selector would pick these instead of the control's own listbox -->
+          <div role="listbox" id="decoy"><div role="option">Yes</div><div role="option">No</div><div role="option">Male</div></div>
+          <script>
+          const form = document.getElementById('application_form');
+          for (const f of %s) {
+            const w = document.createElement('div'); w.className = 'select__container'; w.id = 'w-' + f.id;
+            w.innerHTML = '<label for="' + f.id + '">' + f.label + '</label><div class="select__control">'
+              + '<div class="select__value-container">'
+              + (f.mode === 'stale' ? '<div class="select__single-value">Not applicable</div>' : '')
+              + '<input id="' + f.id + '" role="combobox" aria-controls="react-select-' + f.id + '-listbox" type="text"></div></div>'
+              + '<div id="react-select-' + f.id + '-listbox" role="listbox" hidden></div>';
+            form.appendChild(w);
+            const lb = w.querySelector('[role=listbox]');
+            w.querySelector('input').addEventListener('click', () => {
+              lb.innerHTML = '';
+              for (const o of f.opts) {
+                const d = document.createElement('div'); d.setAttribute('role', 'option'); d.textContent = o;
+                d.addEventListener('click', () => {
+                  if (f.mode === 'commit') {
+                    const vc = w.querySelector('.select__value-container');
+                    let sv = vc.querySelector('.select__single-value');
+                    if (!sv) { sv = document.createElement('div'); sv.className = 'select__single-value'; vc.prepend(sv); }
+                    sv.textContent = o;
+                  }
+                  lb.hidden = true;
+                });
+                lb.appendChild(d);
+              }
+              lb.hidden = false;
+            });
+          }
+          </script></body></html>""" % fields_js
+
+        cand = CandidateConfig(eeo={"gender": "Male"})
+        cfg = ScoutConfig(home_dir=self.home / "browser_form", candidate=cand, targeting=TargetingConfig())
+        applier = ApplierAgent(cfg, Storage(cfg), FakeLLM())
+        opp = Opportunity(id="g:b", source="greenhouse", company="Co", title="VP", location="", url="https://x.example.org", text="")
+        draft = ApplicationDraft(
+            job_id="g:b", company="Co", title="VP", url=opp.url, ats="greenhouse",
+            fields={"first_name": "Testy", "require_sponsorship": "No", "work_authorization": "Authorized to work in the US",
+                    "country": "United States"},
+        )
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                try:
+                    page = browser.new_page()
+                    page.set_content(html)
+                    applier._fill_visible_form(page, page.locator("#application_form"), opp, draft, ResumeProfile(id="r", label="R"))
+                    shown = {
+                        fid: (page.locator(f"#w-{fid} .select__single-value").first.inner_text()
+                              if page.locator(f"#w-{fid} .select__single-value").count() else "")
+                        for fid in ("gender", "auth_us", "auth_ca", "spons", "ignores", "stale")
+                    }
+                    first_name = page.input_value("#first_name")
+                finally:
+                    browser.close()
+        except Exception as exc:  # no browser binary installed
+            if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc):
+                self.skipTest("chromium not installed")
+            raise
+
+        self.assertEqual(first_name, "Testy")
+        self.assertEqual(shown["gender"], "Male")
+        self.assertEqual(shown["auth_us"], "Yes")  # "authorized ... without sponsorship" is an authorization question
+        self.assertEqual(shown["spons"], "No")
+        self.assertEqual(shown["auth_ca"], "")  # profile covers the US only
+        self.assertEqual(shown["ignores"], "")  # click did not commit
+        self.assertEqual(shown["stale"], "Not applicable")  # pre-existing different value is not a confirmation
+        filled = "\n".join(draft.filled_inputs)
+        self.assertIn("[EEO] Gender <- Male", filled)
+        self.assertIn("<- Yes", filled)
+        for flagged in ("authorized to work in Canada", "country would you be working from", "Do you now require visa sponsorship"):
+            self.assertTrue(any(flagged in q for q in draft.unfilled_questions), flagged)
+            self.assertNotIn(flagged, filled)
 
     def test_display_label_collapses_noisy_control_descriptors(self) -> None:
         label = ApplierAgent._display_label

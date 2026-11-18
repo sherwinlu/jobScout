@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 import urllib.parse
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,12 +36,15 @@ FIELD_MATCHERS: list[tuple[str, re.Pattern[str]]] = [
     ("linkedin", re.compile(r"(linkedin)", re.I)),
     ("github", re.compile(r"(github)", re.I)),
     ("website", re.compile(r"(website|portfolio|personal\s+site|blog)", re.I)),
+    # Both can mention "your current location", so they must precede `location`. Authorization comes first:
+    # "authorized to work ... without sponsorship" is an authorization question, not a sponsorship one.
+    ("work_authorization", re.compile(r"(authorized\s+to\s+work|legally\s+authorized|eligible\s+to\s+work|work\s+authorization)", re.I)),
+    ("require_sponsorship", re.compile(r"(sponsorship|visa\s+sponsor|require.*sponsor)", re.I)),
     ("location", re.compile(r"\b(location|current\s+location|city,?\s*state|where\s+are\s+you\s+based)\b", re.I)),
     ("city", re.compile(r"\b(city)\b", re.I)),
+    ("country", re.compile(r"\bcountry\b", re.I)),
     ("desired_compensation", re.compile(r"(salary|compensation|pay\s+expectation)", re.I)),
     ("notice_period", re.compile(r"(notice\s+period|start\s+date|when\s+can\s+you\s+start|availability)", re.I)),
-    ("work_authorization", re.compile(r"(authorized\s+to\s+work|work\s+authorization|legally\s+authorized)", re.I)),
-    ("require_sponsorship", re.compile(r"(sponsorship|visa\s+sponsor|require.*sponsor)", re.I)),
 ]
 
 # Voluntary self-identification (EEO) questions. Checked most-specific first; never sent to the LLM.
@@ -47,7 +52,10 @@ EEO_MATCHERS: list[tuple[str, re.Pattern[str]]] = [
     ("veteran_status", re.compile(r"\b(veteran|military\s+status)\b", re.I)),
     ("disability_status", re.compile(r"\b(disabilit(?:y|ies)|disabled)\b", re.I)),
     ("sexual_orientation", re.compile(r"(sexual\s+orientation|\blgbtq?)", re.I)),
-    ("race_ethnicity", re.compile(r"\b(race|ethnicity|ethnic\s+background|hispanic|latino|latinx)\b", re.I)),
+    ("race_ethnicity", re.compile(r"\brace\b", re.I)),
+    # "Are you Hispanic/Latino?" (often id `hispanic_ethnicity`) is a Yes/No question, distinct from race.
+    ("hispanic_latino", re.compile(r"\b(hispanic|latino|latinx)\b", re.I)),
+    ("race_ethnicity", re.compile(r"\b(ethnicity|ethnic\s+background)\b", re.I)),
     ("gender", re.compile(r"\b(gender|sex|transgender)\b", re.I)),
 ]
 _EEO_GENERIC_RE = re.compile(r"(\beeo\b|equal\s+employment|voluntary\s+self|self[\s-]*identif|demographic)", re.I)
@@ -57,6 +65,8 @@ _EEO_DECLINE_RE = re.compile(
     re.I,
 )
 EEO_OTHER = "eeo_other"
+
+_FILL_PASSES = 2  # a second pass picks up questions revealed by answers given in the first
 
 SUBMIT_TEXT_RE = re.compile(r"\b(submit\s+application|submit|send\s+application|apply\s+now)\b", re.I)
 _SEARCH_FORM_RE = re.compile(r"\b(search|newsletter|subscribe|filter)\b", re.I)
@@ -73,11 +83,54 @@ def detect_ats(url: str, source: str = "") -> str:
     return "generic"
 
 
+# "Country of citizenship/birth" must not be answered with the country the candidate lives in.
+_COUNTRY_EXCLUDE_RE = re.compile(r"citizen|birth|nationality|origin", re.I)
+# Work authorization in the profile covers one country (the US); other countries are the reviewer's call.
+_US_RE = re.compile(r"(?i:\bunited\s+states\b)|\b(?:U\.S\.A?\.?|USA|US)(?!\w)")
+# A question covering more than the US ("the US or Canada") can't be answered "Yes" from US-only authorization.
+_OTHER_REGION_RE = re.compile(
+    r"\b(?:canada|canadian|mexico|united\s+kingdom|uk|great\s+britain|england|ireland|germany|france|india|"
+    r"australia|new\s+zealand|singapore|japan|brazil|europe|european|eu|eea|emea|apac|latam|worldwide|"
+    r"any\s+country|other\s+countries)\b",
+    re.I,
+)
+
+# The place a work-authorization question asks about: the words after "work in" up to the end of the clause.
+# `as` and `;` are deliberately not terminators ("the US as well as Canada", "the US; Canada").
+_WORK_PLACE_RE = re.compile(
+    r"\bwork\s+(?:legally\s+|lawfully\s+)?(?:in|within)\s+(?P<place>.+?\.?)"
+    r"(?=\s*(?:[?:(]|\.\s|\.$|$)|\s+(?:without|with|for|on|now|if|since|and\s+(?:not|do|don|will|would|no))\b)",
+    re.I,
+)
+# Case-sensitive on the US token itself (so the pronoun "us" never matches); only the filler words are not.
+_US_ONLY_RE = re.compile(r"(?:(?i:the)\s+)?(?:" + _US_RE.pattern + r")(?:\s+(?i:of\s+america))?\s*")
+_PAREN_AFTER_RE = re.compile(r"\s*\(([^)]*)\)")
+
+
+def authorization_covered_by_us(descriptor: str) -> bool:
+    """True if a work-authorization question is about the US alone (the profile's one covered country).
+
+    If the question names the place ("work in <place>"), that place must be exactly the US, and a
+    parenthetical right after it must not name another region, so an unlisted country ("the US or
+    Colombia") is left to the reviewer. Only when there is no such phrase does it fall back to
+    "mentions the US and none of the known other regions". Anything unparseable fails safe (blank).
+    """
+    place = _WORK_PLACE_RE.search(descriptor or "")
+    if place:
+        paren = _PAREN_AFTER_RE.match(descriptor[place.end():])
+        if paren and _OTHER_REGION_RE.search(paren.group(1)):
+            return False
+        return bool(_US_ONLY_RE.fullmatch(place.group("place")))
+    return bool(_US_RE.search(descriptor)) and not _OTHER_REGION_RE.search(descriptor)
+
+
 def match_field_key(descriptor: str) -> str | None:
     text = (descriptor or "").strip()
     if not text:
         return None
     for key, pattern in FIELD_MATCHERS:
+        if key == "country" and _COUNTRY_EXCLUDE_RE.search(text):
+            continue
         if pattern.search(text):
             return key
     return None
@@ -96,6 +149,21 @@ def _norm_option(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
+def choose_option(options: list[str], wanted: str) -> int | None:
+    """Index of the option equal to `wanted`, else the only option containing it as whole words."""
+    target = _norm_option(wanted)
+    if not target:
+        return None
+    norms = [_norm_option(o) for o in options]
+    if target in norms:
+        return norms.index(target)
+    hits = [
+        i for i, n in enumerate(norms)
+        if n and (re.search(rf"\b{re.escape(target)}\b", n) or re.search(rf"\b{re.escape(n)}\b", target))
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
 def choose_eeo_option(options: list[str], wanted: str = "", decline: bool = False) -> int | None:
     """Pick the option index for an EEO control, or None when the config gives no safe answer.
 
@@ -105,17 +173,7 @@ def choose_eeo_option(options: list[str], wanted: str = "", decline: bool = Fals
     """
     wanted = (wanted or "").replace("\u2019", "'").strip()
     if wanted and not _EEO_DECLINE_RE.search(wanted):
-        target = _norm_option(wanted)
-        if not target:
-            return None
-        norms = [_norm_option(o) for o in options]
-        if target in norms:
-            return norms.index(target)
-        hits = [
-            i for i, n in enumerate(norms)
-            if n and (re.search(rf"\b{re.escape(target)}\b", n) or re.search(rf"\b{re.escape(n)}\b", target))
-        ]
-        return hits[0] if len(hits) == 1 else None
+        return choose_option(options, wanted)
     if wanted or decline:
         for i, opt in enumerate(options):
             if _EEO_DECLINE_RE.search((opt or "").replace("\u2019", "'")):
@@ -648,7 +706,24 @@ class ApplierAgent(BaseAgent):
             except Exception:
                 continue
 
+        # Answering one dropdown can reveal new questions (e.g. a Race question after Hispanic/Latino).
+        handled: set[str] = set()
+        for _ in range(_FILL_PASSES):
+            self._fill_text_controls(page, app_form, opp, draft, resume, handled)
+
+        self._fill_eeo_choices(app_form, draft)
+
+    def _fill_text_controls(
+        self,
+        page: Any,
+        app_form: Any,
+        opp: Opportunity,
+        draft: ApplicationDraft,
+        resume: ResumeProfile,
+        handled: set[str],
+    ) -> None:
         controls = app_form.locator("input, textarea")
+        occurrences: Counter[str] = Counter()  # distinguishes repeated, id-less controls with the same label
         for idx in range(controls.count()):
             el = controls.nth(idx)
             try:
@@ -658,10 +733,20 @@ class ApplierAgent(BaseAgent):
                 input_type = (el.get_attribute("type") or "text").lower()
                 if input_type in {"hidden", "submit", "button", "file", "checkbox", "radio", "password", "reset", "image"}:
                     continue
-                if el.input_value().strip():
+                is_combobox = self._is_combobox(el)
+                if not is_combobox and el.input_value().strip():
                     continue
 
                 descriptor = self._describe_control(el)
+                base = f"{el.get_attribute('id') or ''}|{descriptor}"
+                marker = f"{base}#{occurrences[base]}"
+                occurrences[base] += 1
+                if marker in handled:
+                    continue
+                handled.add(marker)
+                if is_combobox:
+                    self._fill_combobox(page, el, descriptor, draft)
+                    continue
                 if tag == "textarea" and COVER_LETTER_FIELD_RE.search(descriptor):
                     if draft.cover_letter_required or self._is_control_required(el, descriptor):
                         _, letter_text = self._ensure_custom_cover_letter(opp, draft, resume)
@@ -693,7 +778,99 @@ class ApplierAgent(BaseAgent):
             except Exception:
                 continue
 
-        self._fill_eeo_choices(app_form, draft)
+    # ------------------------------------------------------------------
+    # Dropdowns rendered as ARIA comboboxes (e.g. react-select on Greenhouse job boards)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_combobox(el: Any) -> bool:
+        try:
+            return (el.get_attribute("role") or "").strip().lower() == "combobox"
+        except Exception:
+            return False
+
+    @staticmethod
+    def _combobox_wanted(key: str | None, draft: ApplicationDraft, descriptor: str) -> str:
+        """Profile value to look for among a dropdown's options (non-EEO questions)."""
+        value = draft.fields.get(key, "") if key else ""
+        if key == "work_authorization":
+            # A Yes/No question. Only claim authorization for the country the profile covers.
+            return "Yes" if value.lower().startswith("authorized") and authorization_covered_by_us(descriptor) else ""
+        return value if key in {"require_sponsorship", "country"} else ""
+
+    def _fill_combobox(self, page: Any, el: Any, descriptor: str, draft: ApplicationDraft) -> None:
+        """Open a combobox, choose a real option, and record it only if the selection actually took.
+
+        Typing into these inputs never commits a selection, so the old text-fill path reported fields
+        as filled that were still empty on the page. Any failure leaves the field unrecorded, closes the
+        menu, and flags the question for the reviewer.
+        """
+        label = self._display_label(descriptor, 120)
+        category = match_eeo_category(descriptor)
+        key = None if category else match_field_key(descriptor)
+
+        def flag() -> None:
+            if category:
+                self._flag_eeo(draft, category, descriptor)
+            elif label:
+                draft.unfilled_questions.append(label)
+
+        wanted = "" if category else self._combobox_wanted(key, draft, descriptor)
+        if not category and not wanted:
+            flag()  # nothing in the profile answers this dropdown; leave it for the reviewer
+            return
+
+        chosen = ""
+        try:
+            chosen = self._select_combobox_option(page, el, category, wanted)
+        except Exception as exc:
+            log(f"applier: dropdown {label!r} not filled ({exc})")
+        if not chosen:
+            self._dismiss_menu(page)
+            flag()
+            return
+        text = f"{self._eeo_label(category, descriptor) if category else (label or key)} <- {chosen}"
+        draft.filled_inputs.append(f"[EEO] {text}" if category else text)
+
+    def _select_combobox_option(self, page: Any, el: Any, category: str | None, wanted: str) -> str:
+        """Pick an option for an open-able combobox; returns its text, or "" if nothing safe was selected."""
+        el.scroll_into_view_if_needed()
+        el.click()
+        listbox_id = (el.get_attribute("aria-controls") or "").strip()
+        # The id comes from the page: quote it so an odd value can't break the selector, and prefer
+        # visible options when there is no aria-controls to scope by (hidden decoy listboxes).
+        option_loc = (
+            page.locator(f"[id={json.dumps(listbox_id, ensure_ascii=False)}] [role='option']")
+            if listbox_id
+            else page.locator("[role='option']:visible")
+        )
+        try:
+            option_loc.first.wait_for(timeout=2000)
+        except Exception:
+            pass  # no options appeared; the empty list below makes this a flagged no-op
+        options = [o.strip() for o in option_loc.all_inner_texts()]
+        pick = self._pick_eeo_option(category, options) if category else choose_option(options, wanted)
+        if pick is None:
+            return ""
+
+        option_loc.nth(pick).click()
+        chosen = options[pick]
+        # react-select renders the committed choice in a `*single-value*` element near the input. Never climb
+        # into a wrapper that holds another combobox, or we would read a neighbour's value.
+        shown = el.evaluate(
+            """e => { let n = e; for (let i = 0; i < 6 && n; i++, n = n.parentElement) {
+                if (n.querySelectorAll('[role="combobox"]').length > 1) return '';
+                const v = n.querySelector('[class*="single-value"], [class*="singleValue"]');
+                if (v) return v.innerText || ''; } return ''; }"""
+        )
+        return chosen if _norm_option(str(shown)) == _norm_option(chosen) else ""
+
+    @staticmethod
+    def _dismiss_menu(page: Any) -> None:
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Voluntary self-identification (EEO)

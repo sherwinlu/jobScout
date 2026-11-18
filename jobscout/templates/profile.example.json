@@ -18,14 +18,30 @@
     "notice_period": "",
     "custom_answers": {
       "why_company": ""
+    },
+    "eeo_defaults": {
+      "decline_to_self_identify": true,
+      "gender": "",
+      "race_ethnicity": "",
+      "hispanic_latino": "",
+      "veteran_status": "",
+      "disability_status": "",
+      "sexual_orientation": ""
     }
   },
   "resumes": [
     {
       "id": "default",
       "label": "Primary Resume",
-      "target_roles": ["software engineer", "engineering"],
-      "target_keywords": ["python", "distributed systems", "cloud"],
+      "target_roles": [
+        "software engineer",
+        "engineering"
+      ],
+      "target_keywords": [
+        "python",
+        "distributed systems",
+        "cloud"
+      ],
       "file_path": "resume.md"
     }
   ],
@@ -33,8 +49,15 @@
     {
       "id": "default_cl",
       "label": "Primary Cover Letter",
-      "target_roles": ["software engineer", "engineering"],
-      "target_keywords": ["python", "distributed systems", "cloud"],
+      "target_roles": [
+        "software engineer",
+        "engineering"
+      ],
+      "target_keywords": [
+        "python",
+        "distributed systems",
+        "cloud"
+      ],
       "file_path": ""
     }
   ],
@@ -69,7 +92,10 @@
     },
     "domain_keywords": [],
     "min_match_score": 55,
-    "auto_tailor_verdicts": ["strong_match", "good_match"],
+    "auto_tailor_verdicts": [
+      "strong_match",
+      "good_match"
+    ],
     "seed_companies": [],
     "manual_targets": {
       "greenhouse": [],

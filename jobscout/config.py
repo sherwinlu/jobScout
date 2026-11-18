@@ -50,7 +50,9 @@ def _resolve_path(raw: str | Path | None, base_dir: Path) -> Path | None:
 
 
 # Voluntary self-identification categories ApplierAgent can fill from candidate.eeo_defaults.
-EEO_CATEGORIES = ("gender", "race_ethnicity", "veteran_status", "disability_status", "sexual_orientation")
+EEO_CATEGORIES = (
+    "gender", "race_ethnicity", "hispanic_latino", "veteran_status", "disability_status", "sexual_orientation",
+)
 
 
 @dataclass
