@@ -183,7 +183,15 @@ class TargetingConfig:
         )
 
 
+def _strict_bool(value: Any) -> bool:
+    """Accept only real booleans so that the string "false" is not silently truthy."""
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"expected true or false, got {value!r}")
+
+
 _LLM_OVERRIDE_CASTS: dict[str, Any] = {
+    "think": _strict_bool,
     "base_url": str,
     "model": str,
     "api_key_env": str,
@@ -208,6 +216,9 @@ class LLMConfig:
     max_ranker_evals_per_run: int = 30
     backups: list[dict[str, Any]] = field(default_factory=list)
     agents: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Ollama only: False turns off a reasoning model's thinking, True forces it on, None leaves
+    # the model's default. Ignored by other providers.
+    think: bool | None = None
 
     AGENT_NAMES = ("scout", "ranker", "applier", "curator")
 
@@ -281,6 +292,7 @@ class LLMConfig:
             max_ranker_evals_per_run=int(data.get("max_ranker_evals_per_run", 30)),
             backups=backups,
             agents=agents,
+            think=_strict_bool(data["think"]) if data.get("think") is not None else None,
         )
 
 

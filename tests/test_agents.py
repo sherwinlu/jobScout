@@ -3055,6 +3055,45 @@ class JobScoutAgentsTest(unittest.TestCase):
                 orch.run_pipeline(**kwargs)
                 ensure.assert_called_once_with(*expected)
 
+    def test_ollama_think_option_is_sent_only_when_set(self) -> None:
+        class Resp:
+            def read(self, *_: object) -> bytes:
+                return json.dumps({"message": {"content": "{}"}}).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        for think, expect in ((None, "absent"), (False, False), (True, True)):
+            seen: list[dict] = []
+
+            def urlopen(req, timeout=60, _seen=seen):
+                if req.full_url.endswith("/api/tags"):
+                    raw = json.dumps({"models": [{"name": "m"}]}).encode()
+                    return MagicMock(__enter__=lambda s: s, __exit__=lambda *a: False, read=lambda *_: raw)
+                _seen.append(json.loads(req.data))
+                return Resp()
+
+            with self.subTest(think=think), patch("urllib.request.urlopen", side_effect=urlopen):
+                LocalLLMClient.from_config(LLMConfig.from_dict({"model": "m", "think": think})).chat_json("s", "u")
+                body = seen[0]
+                self.assertEqual(body.get("think", "absent"), expect)
+
+    def test_think_is_configurable_per_agent_and_must_be_boolean(self) -> None:
+        cfg = LLMConfig.from_dict(
+            {"provider": "ollama", "model": "m", "think": True, "agents": {"curator": {"think": False}}}
+        )
+        self.assertIs(cfg.think, True)
+        self.assertIs(cfg.for_agent("curator").think, False)
+        self.assertIs(cfg.for_agent("ranker").think, True)
+        for bad in ("false", 0, "no"):
+            with self.subTest(bad), self.assertRaisesRegex(ValueError, "true or false"):
+                LLMConfig.from_dict({"think": bad})
+            with self.subTest(bad), self.assertRaisesRegex(ValueError, "think is invalid"):
+                LLMConfig.from_dict({"agents": {"curator": {"think": bad}}})
+
     def test_ollama_retries_without_json_format_when_server_rejects_it(self) -> None:
         bodies: list[dict] = []
 
