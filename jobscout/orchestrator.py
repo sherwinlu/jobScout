@@ -7,7 +7,7 @@ from jobscout.agents.applier import ApplierAgent
 from jobscout.agents.curator import CurationReport, CuratorAgent
 from jobscout.agents.ranker import RankerAgent
 from jobscout.agents.scout import ScoutAgent, ScoutReport
-from jobscout.config import ScoutConfig, load_config
+from jobscout.config import LLMConfig, ScoutConfig, load_config
 from jobscout.llm import LocalLLMClient
 from jobscout.models import ApplicationDraft, Opportunity, RankedOpportunity
 from jobscout.storage import Storage
@@ -32,10 +32,22 @@ class JobScoutOrchestrator:
         self.config = config or load_config()
         self.storage = storage or Storage(self.config)
         self.llm = llm or LocalLLMClient.from_config(self.config.llm)
-        self.scout = ScoutAgent(self.config, self.storage, self.llm)
-        self.ranker = RankerAgent(self.config, self.storage, self.llm)
-        self.applier = ApplierAgent(self.config, self.storage, self.llm)
-        self.curator = CuratorAgent(self.config, self.storage, self.llm)
+        # An injected client is used by every agent; otherwise `llm.agents` may give an
+        # agent its own provider/model. Agents without an override share self.llm.
+        self._agent_llms = {
+            name: self.llm
+            if llm is not None or name not in self.config.llm.agents
+            else LocalLLMClient.from_config(self.config.llm.for_agent(name))
+            for name in LLMConfig.AGENT_NAMES
+        }
+        self.scout = ScoutAgent(self.config, self.storage, self._agent_llms["scout"])
+        self.ranker = RankerAgent(self.config, self.storage, self._agent_llms["ranker"])
+        self.applier = ApplierAgent(self.config, self.storage, self._agent_llms["applier"])
+        self.curator = CuratorAgent(self.config, self.storage, self._agent_llms["curator"])
+
+    def _ensure_llms(self, *names: str) -> None:
+        for client in {id(c): c for c in (self._agent_llms[n] for n in names)}.values():
+            client.ensure_available()
 
     def run_pipeline(
         self,
@@ -48,7 +60,7 @@ class JobScoutOrchestrator:
         tailor_resumes: bool = True,
         curate: bool = True,
     ) -> PipelineResult:
-        self.llm.ensure_available()
+        self._ensure_llms("scout", "ranker", *(("curator",) if curate and self.config.curation.enabled else ()))
         report = self.scout.run(
             build=build,
             scan_boards=scan_boards,
@@ -118,7 +130,7 @@ class JobScoutOrchestrator:
         require_cover_letter: bool = False,
         approval_callback: Callable[[ApplicationDraft], str] | None = None,
     ) -> ApplicationDraft:
-        self.llm.ensure_available()
+        self._ensure_llms("applier")
         opp = self.resolve_target_opportunity(target)
         if opp is None:
             raise ValueError(

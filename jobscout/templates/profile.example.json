@@ -121,7 +121,8 @@
     "retry_backoff_seconds": 1.0,
     "max_news_articles_per_run": 25,
     "max_ranker_evals_per_run": 30,
-    "backups": []
+    "backups": [],
+    "agents": {}
   },
   "applier": {
     "headless": false,

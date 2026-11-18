@@ -126,6 +126,7 @@ class LocalLLMClient:
         self._available_cache: bool | None = None
         self.unavailable_reason: str = ""
         self._active_index: int = 0
+        self._json_format_unsupported = False
 
     @classmethod
     def from_config(
@@ -402,9 +403,18 @@ class LocalLLMClient:
                 "stream": False,
                 "options": {"temperature": temperature},
             }
-            if expect_json:
+            if expect_json and not self._json_format_unsupported:
                 payload["format"] = "json"
-            raw = self._post_json(f"{self.base_url}/api/chat", payload)
+            try:
+                raw = self._post_json(f"{self.base_url}/api/chat", payload)
+            except _NonRetryableLLMError as exc:
+                # Some builds (e.g. MLX-backed models) reject `format`. The prompts already
+                # ask for JSON and callers parse it tolerantly, so retry without it.
+                if "format" not in payload or "structured output is unavailable" not in str(exc):
+                    raise
+                self._json_format_unsupported = True
+                del payload["format"]
+                raw = self._post_json(f"{self.base_url}/api/chat", payload)
             return ((raw.get("message") or {}).get("content") or "").strip()
 
         if self.provider in self._OPENAI_COMPAT_PROVIDERS or self.provider in self._OPENAI_CLOUD_PROVIDERS:

@@ -18,6 +18,8 @@ First public pre-release (alpha). The internal `2.0.0` numbering was reset becau
 - Curator discovers unknown ATS platforms by clustering unrecognized job-board domains in stored postings, gathering evidence (page API hints and optional configured web search), inferring a JSON API spec with the LLM, and live-verifying it before activation. Failed hosts are tracked in `curation.json` (`unknown_hosts`) and retried with backoff.
 - `ApplierAgent` now recognizes voluntary EEO/self-identification questions (gender, race/ethnicity, veteran, disability, sexual orientation). They are never LLM-answered; selects and radios are filled only from `candidate.eeo_defaults` (`decline_to_self_identify` and/or explicit values), checkboxes are never ticked, and unanswered EEO controls are flagged `[EEO]` for review. EEO values are redacted from the `applications` DB row.
 
+- `llm.agents` in `profile.json` gives `scout`, `ranker`, `applier` or `curator` its own provider/model (for example, rank locally and draft application answers with a cloud model). `status` lists any overrides.
+
 ### Fixed
 - On Lever forms, custom questions were labeled by their input name (`cards[...][field0]`), so every essay box got the same generic answer; the question text is now read from `div.application-label`. Required radio groups, checkboxes, and selects that the applier doesn't answer (for example "highest level of education") are now listed under "Needs your review" instead of being silently left blank, and the `✱` required marker is stripped from displayed labels.
 - Greenhouse postings on a company's own careers site (the form is embedded in an iframe) were not filled at all. The applier now opens the embedded form's own `greenhouse.io` URL and fills it as usual.
