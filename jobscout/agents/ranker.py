@@ -259,10 +259,18 @@ class RankerAgent(BaseAgent):
         tailor_resumes: bool = True,
     ) -> list[RankedOpportunity]:
         self.llm.ensure_available()
+        # Default path: consider everything stored (prefilter is cheap; a recency window silently hid
+        # matches) but don't spend the per-run LLM budget re-scoring jobs that already have a ranking,
+        # which would starve new ones once more than `max_ranker_evals_per_run` candidates qualify.
+        # An explicit `opportunities` list or `--all` re-evaluates as before (still capped at the budget).
+        skip_ranked = opportunities is None and not show_all
         if opportunities is None:
-            opportunities = self.storage.load_opportunities(limit=1000)
+            opportunities = self.storage.load_opportunities(limit=None)
 
         filtered = self.prefilter(opportunities)
+        if skip_ranked and filtered:
+            ranked_ids = self.storage.get_ranked_ids()
+            filtered = [c for c in filtered if c[0].id not in ranked_ids]
         log(f"ranker: {len(filtered)} opportunities pass title/location/signal filters")
         log(f"ranker: evaluating top matches with {self.llm.active_provider} ({self.llm.active_model})")
 

@@ -1097,6 +1097,52 @@ class JobScoutAgentsTest(unittest.TestCase):
         self.assertIsNone(choose_eeo_option(["Asian", "Asian American"], wanted="Asian American Pacific"))
         self.assertIsNone(choose_eeo_option(["", "Male", "Female"], wanted="---"))
 
+    def test_ranker_ranks_an_old_match_buried_under_more_than_1000_newer_rows(self) -> None:
+        cfg = self._unknown_ats_config("ranker_all")
+        storage = Storage(cfg)
+        fillers = [
+            # An empty title never passes the title filter, so only the real match qualifies.
+            Opportunity(id=f"greenhouse:Co:{i}", source="greenhouse", company="Co", title="", location="Remote",
+                        url=f"https://boards.greenhouse.io/co/jobs/{i}", text="")
+            for i in range(1100)
+        ]
+        match = Opportunity(id="greenhouse:Co:match", source="greenhouse", company="Co", title="VP of Engineering",
+                            location="Remote", url="https://boards.greenhouse.io/co/jobs/match", text="Lead engineering.")
+        storage.save_opportunities(fillers + [match])
+        with closing(storage._connect()) as conn:  # make the match the oldest row
+            conn.execute("UPDATE opportunities SET discovered_at = ? WHERE id = ?", ("2000-01-01T00:00:00", match.id))
+            conn.commit()
+        self.assertEqual(len(storage.load_opportunities(limit=None)), 1101)
+        self.assertEqual(len(storage.load_opportunities(limit=5)), 5)
+
+        ranker = RankerAgent(cfg, storage, FakeLLM([{"match_score": 80, "verdict": "good_match"}]))
+        with patch("jobscout.agents.ranker.notify_macos"):
+            shown = ranker.run(dry_run=True, tailor_resumes=False)
+        self.assertEqual([r.opportunity.id for r in shown], [match.id])
+
+    def test_ranker_spends_its_llm_budget_on_unranked_jobs_unless_all_is_requested(self) -> None:
+        cfg = self._unknown_ats_config("ranker_budget")
+        cfg.llm.max_ranker_evals_per_run = 2
+        storage = Storage(cfg)
+        storage.save_opportunities(
+            [Opportunity(id=f"greenhouse:Co:{n}", source="greenhouse", company="Co", title=f"VP of Engineering {n}",
+                         location="Remote", url=f"https://boards.greenhouse.io/co/jobs/{n}", text="Lead engineering.")
+             for n in "abc"]
+        )
+        llm = FakeLLM([{"match_score": 80, "verdict": "good_match"}] * 3)
+        ranker = RankerAgent(cfg, storage, llm)
+        with patch("jobscout.agents.ranker.notify_macos"):
+            first = ranker.run(tailor_resumes=False)
+            second = ranker.run(tailor_resumes=False)
+            third = ranker.run(tailor_resumes=False)
+            calls_before_all = len(llm.prompts)
+            ranker.run(show_all=True, tailor_resumes=False)
+        # Budget of 2 per run: run 1 scores two jobs, run 2 reaches the third, run 3 has nothing left to score.
+        self.assertEqual([len(first), len(second), len(third)], [2, 1, 0])
+        self.assertEqual(calls_before_all, 3)
+        self.assertEqual(len({r.opportunity.id for r in first + second}), 3)
+        self.assertGreater(len(llm.prompts), calls_before_all)  # --all re-evaluates ranked jobs
+
     def test_display_label_collapses_noisy_control_descriptors(self) -> None:
         label = ApplierAgent._display_label
         self.assertEqual(label("First Name * | First Name * | job_application[first_name] | "), "First Name")

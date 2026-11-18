@@ -223,7 +223,7 @@ sequenceDiagram
    $$\text{final\_score} = 0.75 \times \text{llm\_score} + 0.25 \times \min(100, \text{heuristic\_pts} \times 4)$$
    and normalizing `verdict` (`strong_match`, `good_match`, `stretch`, `skip`).
 3. **Multi-Resume Synthesis (`tailor_resume_for_opportunity`)**: For jobs whose verdict is in `targeting.auto_tailor_verdicts` (default `["strong_match", "good_match"]`), `resume_tailor.py` passes PII-scrubbed excerpts of **all** configured resumes to the LLM to synthesize one grounded resume (strictly prohibiting invented employers, titles, dates, degrees, or metrics), re-attaches local candidate contact headers, writes `tailored_resume.md`, and generates a valid OOXML archive (`tailored_resume.docx`) using stdlib `zipfile` + XML escaping. Falls back cleanly to deterministic heuristic bullet merging if synthesis raises an unexpected parse error.
-4. **Digest & Notification**: Filters out `verdict == "skip"` (and previously seen IDs unless `--all`), updates `seen` (unless `--dry-run`), writes the daily digest, and triggers a sanitized macOS `osascript` notification when matches exist.
+4. **Digest & Notification**: Filters out `verdict == "skip"` (and previously seen IDs unless `--all`); `--all` re-evaluates already-ranked jobs but LLM scoring is still capped at `max_ranker_evals_per_run`, updates `seen` (unless `--dry-run`), writes the daily digest, and triggers a sanitized macOS `osascript` notification when matches exist.
 
 ### Stage 3: `ApplierAgent` (`jobscout/agents/applier.py`) + `cover_letter_tailor.py`
 

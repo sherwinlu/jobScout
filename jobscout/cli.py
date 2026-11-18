@@ -174,7 +174,7 @@ def _add_scout_flags(parser: argparse.ArgumentParser) -> None:
 
 def _add_rank_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true", help="do not mark jobs as seen")
-    parser.add_argument("--all", action="store_true", help="show all matches, not just new")
+    parser.add_argument("--all", action="store_true", help="re-evaluate and show matches already seen, not just new ones")
     parser.add_argument(
         "--no-tailor",
         action="store_true",

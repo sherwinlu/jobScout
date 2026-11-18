@@ -178,6 +178,10 @@ class Storage:
             self._db_ready = True
         return conn
 
+    def get_ranked_ids(self) -> set[str]:
+        with closing(self._connect()) as conn:
+            return {row[0] for row in conn.execute("SELECT opportunity_id FROM rankings")}
+
     def get_seen_ids(self) -> set[str]:
         with closing(self._connect()) as conn:
             return {row[0] for row in conn.execute("SELECT id FROM seen")}
@@ -224,7 +228,9 @@ class Storage:
             conn.commit()
             return len(opportunities)
 
-    def load_opportunities(self, unranked_only: bool = False, limit: int = 500) -> list[Opportunity]:
+    def load_opportunities(self, unranked_only: bool = False, limit: int | None = 500) -> list[Opportunity]:
+        """Newest-first opportunities; `limit=None` returns everything (SQLite treats LIMIT -1 as unbounded)."""
+        limit = -1 if limit is None else limit
         with closing(self._connect()) as conn:
             if unranked_only:
                 rows = conn.execute(
