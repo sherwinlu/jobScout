@@ -1512,6 +1512,63 @@ class JobScoutAgentsTest(unittest.TestCase):
         )
         self.assertEqual(checked, 1)  # only the page's own pre-checked radio; nothing was ticked for the user
 
+    @unittest.skipUnless(sync_playwright, "playwright not installed")
+    def test_applier_follows_a_greenhouse_form_embedded_in_a_companys_careers_page(self) -> None:
+        form = ('<!doctype html><html><body><form id="application-form" action="/embed/job_app?for=co&token=1">'
+                '<input id="first_name" type="text"></form></body></html>')
+
+        def page_with(iframe_src: str, body: str = "") -> str:
+            return f'<!doctype html><html><body>{body}<iframe src="{iframe_src}"></iframe></body></html>'
+
+        pages = {
+            "https://careers.example.org/ok": page_with("https://job-boards.greenhouse.io/embed/job_app?for=co&token=1"),
+            "https://careers.example.org/rel": page_with("//job-boards.greenhouse.io/embed/job_app?for=co&token=1"),
+            "https://careers.example.org/evil": page_with("https://evil.example.com/x/greenhouse.io/embed/job_app?for=co"),
+            "https://careers.example.org/http": page_with("http://job-boards.greenhouse.io/embed/job_app?for=co"),
+            "https://careers.example.org/has-form": page_with(
+                "https://job-boards.greenhouse.io/embed/job_app?for=co&token=1",
+                body='<form id="application-form"><input type="text"></form>',
+            ),
+            "https://careers.example.org/none": "<!doctype html><html><body><p>No form here</p></body></html>",
+        }
+
+        def handle(route) -> None:
+            url = route.request.url
+            if url.startswith("https://job-boards.greenhouse.io/embed/job_app"):
+                route.fulfill(status=200, content_type="text/html", body=form)
+            elif url in pages:
+                route.fulfill(status=200, content_type="text/html", body=pages[url])
+            else:
+                route.fulfill(status=204, body="")
+
+        results: dict[str, tuple[bool, str]] = {}
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                try:
+                    page = browser.new_page()
+                    page.route("**/*", handle)
+                    for name in ("ok", "rel", "evil", "http", "has-form", "none"):
+                        page.goto(f"https://careers.example.org/{name}", wait_until="domcontentloaded")
+                        moved = ApplierAgent._follow_greenhouse_embed(page, wait_ms=300)
+                        results[name] = (moved, page.url)
+                    page.goto("https://careers.example.org/ok", wait_until="domcontentloaded")
+                    ApplierAgent._follow_greenhouse_embed(page, wait_ms=300)
+                    has_form = page.locator("form#application-form").count()
+                finally:
+                    browser.close()
+        except Exception as exc:  # no browser binary installed
+            if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc):
+                self.skipTest("chromium not installed")
+            raise
+
+        self.assertEqual(results["ok"], (True, "https://job-boards.greenhouse.io/embed/job_app?for=co&token=1"))
+        self.assertTrue(results["rel"][0])
+        self.assertEqual(has_form, 1)  # the form is now top-level, where the form locator can see it
+        for name in ("evil", "http", "has-form", "none"):  # wrong host, plain HTTP, form already present, no iframe
+            self.assertFalse(results[name][0], name)
+            self.assertEqual(results[name][1], f"https://careers.example.org/{name}", name)
+
     @staticmethod
     def _plain_resume(name: str, jobs: list[tuple[str, str, str, list[str]]], education: str) -> str:
         """A resume shaped like text extracted from a .docx: caps headings, dated job lines, no bullets."""
