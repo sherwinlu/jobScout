@@ -1,6 +1,28 @@
-# Security & Privacy Policy
+# Security Policy
 
-## Local-First Privacy & PII Protection
+## Supported Versions
+
+| Version | Supported |
+| ------- | --------- |
+| `0.1.x` | Yes |
+
+## Reporting a Vulnerability
+
+Please **do not** report security vulnerabilities through public GitHub issues or pull requests.
+
+Instead, use **[GitHub Private Vulnerability Reporting](https://github.com/sherwinlu/jobScout/security/advisories/new)** on this repository (under the **Security** tab -> **Report a vulnerability**) to disclose the issue privately. Include:
+
+- A description of the vulnerability and its potential impact.
+- Steps or a minimal configuration/profile that reproduces the issue.
+- Affected version or commit hash.
+
+You can expect an acknowledgment within 72 hours and a coordinated fix before public disclosure.
+
+---
+
+## Built-in Security Controls
+
+### Local-First Privacy & PII Protection
 
 JobScout minimizes where personal identifiable information (PII) is stored or sent:
 
@@ -12,7 +34,7 @@ JobScout minimizes where personal identifiable information (PII) is stored or se
   - Custom `api_key_env` names must follow an LLM/JobScout naming convention (`OPENAI_*`, `GEMINI_*`, `GOOGLE_*`, `ANTHROPIC_*`, `CLAUDE_*`, `LLM_*`, `JOBSCOUT_*`, or `*_LLM_API_KEY`), preventing untrusted `profile.json` files from reading unrelated secrets such as `AWS_SECRET_ACCESS_KEY`.
   - Local LLM servers check exact configured model names with no silent model substitution.
 
-## Human-in-the-Loop, Browser & Network Safety
+### Human-in-the-Loop, Browser & Network Safety
 
 - **Browser SSRF & form exfiltration guards**: Before launching Playwright or auto-filling forms, `ApplierAgent` validates `opp.url`, the post-navigation `page.url`, and any non-empty `<form action>` via `validate_public_url()` (and blocks HTTPS→HTTP downgrade actions). Playwright requests to non-`http`/`https` schemes or private/loopback/link-local hosts are aborted via context route interception. Password, hidden, button, and file-mismatch controls are skipped.
 - **Human-in-the-loop gate**: `ApplierAgent` isolates the dedicated application `<form>`, displays full filled values, captures `pre_submit.png`, and waits for explicit `SUBMIT` (exact uppercase) or manual browser submission (`done`).
@@ -20,8 +42,12 @@ JobScout minimizes where personal identifiable information (PII) is stored or se
 - **Input validation & XML safety**: ATS board slugs are validated against strict identifier characters (blocking path/query/fragment injection). Feed and `.docx` XML parsing uses `defusedxml` when installed or rejects `<!DOCTYPE`/`<!ENTITY` declarations, checks decompressed `.docx` entry sizes to block zip bombs, and strips invalid XML 1.0 control characters when generating `.docx`.
 - JobScout does **not** bypass CAPTCHAs, login walls, or anti-bot checks.
 
-## Reporting a Vulnerability
+---
 
-If you discover a security issue, please **email [security-contact-removed@example.invalid](mailto:security-contact-removed@example.invalid)** with the subject line `JobScout security` and include steps to reproduce, the affected version, and the impact you observed. Please do not post exploit details in a public issue or pull request.
+## Operational Security Guidelines for Users
 
-This is a hobby project maintained on a best-effort basis, so there is no guaranteed response time, but reports are taken seriously and credited in the fix unless you prefer otherwise.
+- **Keep your profile and documents private.** `profile.json`, `resume.md`, `resumes/*`, and `cover_letters/*` contain personal information and are gitignored; never commit them or paste them into issues. Application drafts, tailored resumes, and screenshots under `~/job-scout/` also contain personal data.
+- **Keep API keys in environment variables.** Reference cloud LLM keys by variable name via `llm.api_key_env` (for example `GEMINI_API_KEY`); never put a key in `profile.json`.
+- **Do not expose a local LLM server to untrusted networks.** Ollama (`:11434`) and `mlx_lm.server` have no built-in authentication; keep them bound to localhost.
+- **Review everything before it is sent.** JobScout never submits an application on its own: check the approval prompt, the filled values, and the generated resume and cover letter (LLM output can be wrong) before typing `SUBMIT`.
+- **Be careful with `politeness.contact_email`.** It is sent in the `User-Agent`/`From` headers to every site JobScout contacts, so use an address you are comfortable sharing or leave it blank.
