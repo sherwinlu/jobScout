@@ -316,6 +316,17 @@ def compute_source_quality_score(stat: dict[str, Any]) -> float:
     return round(max(0.0, min(100.0, score)), 1)
 
 
+def llm_prune_has_evidence(stat: dict[str, Any], min_evals: int) -> bool:
+    """An LLM "prune this source" verdict only counts once the source has enough ranked results,
+    none of them good matches or applications. The LLM sees names and metrics, not postings, so
+    on a source we have barely evaluated its verdict is a guess about the name."""
+    return (
+        int(stat.get("ranked", 0)) >= min_evals
+        and int(stat.get("strong_good", 0)) == 0
+        and int(stat.get("applied", 0)) == 0
+    )
+
+
 @dataclass
 class CurationReport:
     """Summary of sources added, pruned, and scored by CuratorAgent."""
@@ -911,11 +922,13 @@ class CuratorAgent(BaseAgent):
             report.source_scores[f"board:{name}"] = q
 
         feed_scores: dict[str, dict[str, Any]] = {}
+        feed_name_by_url: dict[str, str] = {}
         all_feeds = list(self.config.targeting.news_feeds) + list(curation_state["feeds"])
         for f in all_feeds:
             f_url = str(f.get("url") or f.get("name") or "").strip()
             if not f_url:
                 continue
+            feed_name_by_url[f_url] = str(f.get("name") or "").strip()
             st = dict(metrics["feeds"].get(f_url) or metrics["feeds"].get(f.get("name", "")) or {"total": 0, "ranked": 0, "strong_good": 0, "skip": 0, "applied": 0, "aborted": 0, "avg_score": 0.0})
             q = compute_source_quality_score(st)
             st["quality_score"] = q
@@ -937,10 +950,20 @@ class CuratorAgent(BaseAgent):
         llm_decisions = self._review_sources_with_llm(
             board_scores, feed_scores, platform_scores, curation_state["news_sites"]
         )
-        llm_prune_boards = {_norm(x) for x in llm_decisions["prune_boards"]}
-        llm_prune_feeds = set(llm_decisions["prune_feeds"])
+        llm_prune_boards = {
+            _norm(x)
+            for x in llm_decisions["prune_boards"]
+            if any(_norm(n) == _norm(x) and llm_prune_has_evidence(st, min_evals) for n, st in board_scores.items())
+        }
+        llm_prune_feeds = {
+            x
+            for x in llm_decisions["prune_feeds"]
+            if any(x in (u, feed_name_by_url.get(u)) and llm_prune_has_evidence(st, min_evals) for u, st in feed_scores.items())
+        }
         llm_prune_sites = set(llm_decisions["prune_news_sites"])
-        llm_prune_platforms = set(llm_decisions["prune_ats_platforms"])
+        llm_prune_platforms = {
+            x for x in llm_decisions["prune_ats_platforms"] if llm_prune_has_evidence(platform_scores.get(x, {}), min_evals)
+        }
 
         # 2. Execute pruning on low-scoring or LLM-rejected boards
         pruned_companies: set[str] = set()

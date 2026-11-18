@@ -23,7 +23,7 @@ from jobscout.agents.applier import (
     match_eeo_category,
     match_field_key,
 )
-from jobscout.agents.curator import CuratorAgent
+from jobscout.agents.curator import CurationReport, CuratorAgent
 from jobscout.ats_discovery import cluster_unknown_job_hosts, parse_search_results
 from jobscout.agents.ranker import RankerAgent
 from jobscout.agents.scout import ScoutAgent, extract_article_text, parse_feed_xml
@@ -2951,6 +2951,42 @@ class JobScoutAgentsTest(unittest.TestCase):
         ):
             rc = cli_main(["--home", str(cfg.home_dir), "--profile", str(prof_path), "curate", "--no-discover"])
             self.assertEqual(rc, 0)
+
+    def test_curator_ignores_llm_prune_verdicts_without_ranking_evidence(self) -> None:
+        cfg = ScoutConfig(
+            home_dir=self.home / "curator_llm_gate",
+            candidate=CandidateConfig(first_name="Alex", last_name="Rivera", email="alex@example.com"),
+            curation=CurationConfig(min_evals_before_prune=3, prune_score_threshold=40.0),
+        )
+        storage = Storage(cfg)
+        targets = storage.load_targets_state()
+        names = ["NeverRanked", "RankedNoMatches", "HasStrongMatch"]
+        targets["resolved"] = {n: {"ats": "greenhouse", "slug": n.lower(), "source": "seed"} for n in names}
+        storage.save_targets_state(targets)
+
+        def stat(ranked, strong_good, avg):
+            return {"total": ranked, "ranked": ranked, "strong_good": strong_good, "skip": 0,
+                    "applied": 0, "aborted": 0, "avg_score": avg}
+
+        metrics = {
+            "boards": {
+                "RankedNoMatches": stat(4, 0, 95.0),  # q ~43 (>= threshold): only the LLM verdict can prune it
+                "HasStrongMatch": stat(4, 2, 70.0),
+            },
+            "feeds": {},
+            "platforms": {},
+        }
+        curator = CuratorAgent(cfg, storage, FakeLLM([]))
+        curator._review_sources_with_llm = lambda *a, **k: {
+            "prune_boards": names,
+            "prune_feeds": [],
+            "prune_news_sites": [],
+            "prune_ats_platforms": [],
+        }
+        report = CurationReport()
+        curator._prune_sources(metrics, storage.load_targets_state(), storage.load_curation_state(), report)
+
+        self.assertEqual(report.pruned_boards, ["RankedNoMatches"])
 
     def test_agent_llm_override_inherits_or_isolates_by_provider(self) -> None:
         cfg = LLMConfig.from_dict(
