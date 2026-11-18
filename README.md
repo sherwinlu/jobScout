@@ -5,7 +5,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#disclaimer)
 
-> **Alpha software (`0.1.0a1`).** The unit tests use mocked HTTP, LLM, and browser objects. The pipeline has not yet been validated end-to-end against live Greenhouse/Lever/Ashby forms, so expect rough edges and breaking changes before 1.0. Always use `--prepare-only` first and review everything before submitting. See the [Disclaimer](#disclaimer).
+> **Alpha software (`0.1.0a1`).** The unit tests use mocked HTTP, LLM, and browser objects, plus a few real-Chromium tests on markup copied from live forms. The pipeline has been run end to end by hand against a small number of live Greenhouse, Lever, and Ashby postings, always stopping at the approval step; it has not been used to submit a real application, and form layouts vary widely, so expect rough edges and breaking changes before 1.0. Always use `--prepare-only` first and review everything before submitting. See [Supported application forms](#supported-application-forms) and the [Disclaimer](#disclaimer).
 
 A local-first, **four-agent** job search pipeline powered by your local LLM (**Ollama** / **MLX**) or cloud LLMs (**Gemini**, **ChatGPT**, **Claude**) and **Playwright**.
 
@@ -196,6 +196,28 @@ python3 job_scout.py apply 1 --prepare-only # Only drafts answers & saves packet
 python3 job_scout.py apply 1 --resume-id my_resume
 python3 job_scout.py apply https://boards.greenhouse.io/<company>/jobs/<id>
 ```
+
+### Supported application forms
+
+`apply` opens the posting in a browser, fills what it can, lists everything it could not answer under "Needs your review", and pauses before Submit. Nothing is submitted until you type `SUBMIT`.
+
+| ATS | Form handling |
+|---|---|
+| **Greenhouse** | Job boards served by Greenhouse, including react-select dropdowns, and forms embedded in a company's own careers page (the embedded form is opened directly). |
+| **Lever** | Standard fields plus custom questions, read by their question text. |
+| **Ashby** | The div-based application form (it has no `<form>` element). Ashby may overwrite fields with its own resume autofill after the upload, so check the page before submitting. |
+
+What to expect on any form:
+
+- **Required questions it cannot answer are listed, not guessed.** Unanswered required radio groups, checkboxes (such as consent boxes), and dropdowns are never ticked or selected for you. Voluntary EEO questions are filled only from `candidate.eeo_defaults`.
+- **Work authorization is answered "Yes" only for questions about the US alone.** A question that names another country or region ("the US or Canada") is left for you.
+- **Free-text answers use only facts from your resume.** A question the resume cannot answer (for example, preferences) is left blank.
+- **Other site layouts** are not auto-filled; the tool says so and still saves the packet and tailored resume.
+
+Known limitations:
+
+- **Ashby boards are not scanned.** `api.ashbyhq.com/robots.txt` returns HTTP 401, which JobScout treats as disallowed (it respects `robots.txt`). Apply to an Ashby posting by URL: `apply https://jobs.ashbyhq.com/<company>/<job-id>`.
+- **News leads in the queue are not job postings.** Items such as "CTO at <company>" come from funding news and have no application form.
 
 ---
 
