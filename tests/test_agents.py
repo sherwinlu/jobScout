@@ -2962,12 +2962,18 @@ class JobScoutAgentsTest(unittest.TestCase):
                 "agents": {
                     "ranker": {"model": "qwen2.5:32b"},
                     "applier": {"provider": "gemini", "model": "gemini-2.5-flash"},
-                    "bogus": {"model": "x"},
+                    "curator": {},
                 },
             }
         )
         self.assertEqual(set(cfg.agents), {"ranker", "applier"})
         self.assertIs(cfg.for_agent("curator"), cfg)
+
+        with self.assertRaises(ValueError):
+            LLMConfig.from_dict({"provider": "ollama", "agents": {"bogus": {"model": "x"}}})
+
+        malformed = LLMConfig.from_dict({"provider": "ollama", "agents": ["not-a-dict"]})
+        self.assertEqual(malformed.agents, {})
 
         ranker = cfg.for_agent("ranker")
         self.assertEqual(
@@ -2995,6 +3001,30 @@ class JobScoutAgentsTest(unittest.TestCase):
         injected = JobScoutOrchestrator(config=self.config, storage=self.storage, llm=OfflineLLM())
         self.assertIs(injected.applier.llm, injected.llm)
 
+    def test_status_prints_agent_llm_overrides(self) -> None:
+        from jobscout.cli import cmd_status
+
+        self.config.llm = LLMConfig.from_dict(
+            {
+                "provider": "ollama",
+                "model": "qwen2.5:14b",
+                "agents": {"applier": {"provider": "gemini", "model": "gemini-2.5-flash"}},
+            }
+        )
+        orch = JobScoutOrchestrator(config=self.config, storage=self.storage)
+        buf = io.StringIO()
+        with (
+            patch.object(orch.llm, "is_available", return_value=True),
+            patch.object(orch.applier.llm, "is_available", return_value=False),
+            patch("sys.stdout", buf),
+        ):
+            orch.applier.llm.unavailable_reason = "missing key"
+            rc = cmd_status(orch)
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("LLM (applier):", out)
+        self.assertIn("gemini(gemini-2.5-flash, available=no - missing key)", out)
+
     def test_ollama_retries_without_json_format_when_server_rejects_it(self) -> None:
         bodies: list[dict] = []
 
@@ -3018,7 +3048,7 @@ class JobScoutAgentsTest(unittest.TestCase):
             bodies.append(body)
             if "format" in body:
                 raise urllib.error.HTTPError(
-                    req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error":"structured output is unavailable"}')
+                    req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error":"Structured output is unavailable"}')
                 )
             return Resp({"message": {"content": '{"ok": true}'}})
 
@@ -3027,6 +3057,116 @@ class JobScoutAgentsTest(unittest.TestCase):
             self.assertEqual(client.chat_json("sys", "usr"), {"ok": True})
             self.assertEqual(client.chat_json("sys", "usr"), {"ok": True})
         self.assertEqual(["format" in b for b in bodies], [True, False, False])
+
+    def test_ollama_does_not_retry_unrelated_400_without_json_format(self) -> None:
+        calls = 0
+
+        class Resp:
+            def __init__(self, payload: dict) -> None:
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self, *_: object) -> bytes:
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def urlopen(req, timeout=60):
+            nonlocal calls
+            if req.full_url.endswith("/api/tags"):
+                return Resp({"models": [{"name": "m"}]})
+            calls += 1
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error":"model not found"}')
+            )
+
+        client = LocalLLMClient(provider="ollama", model="m")
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            with self.assertRaises(LocalLLMError):
+                client.chat_json("sys", "usr")
+        self.assertEqual(calls, 1)
+
+    def test_orchestrator_ensure_llms_checks_only_active_agents(self) -> None:
+        from jobscout.agents.scout import ScoutReport
+
+        self.config.llm = LLMConfig.from_dict(
+            {
+                "provider": "ollama",
+                "model": "qwen2.5:14b",
+                "agents": {
+                    "curator": {"provider": "gemini", "model": "gemini-2.5-flash"},
+                    "applier": {"provider": "claude", "model": "claude-sonnet-4-20250514"},
+                },
+            }
+        )
+        orch = JobScoutOrchestrator(config=self.config, storage=self.storage)
+        with (
+            patch.object(orch.llm, "ensure_available") as primary_check,
+            patch.object(orch.curator.llm, "ensure_available") as curator_check,
+            patch.object(orch.applier.llm, "ensure_available") as applier_check,
+            patch.object(orch.scout, "run", return_value=ScoutReport(opportunities=[], new_targets=[])),
+            patch.object(orch.ranker, "run", return_value=[]),
+        ):
+            orch.run_pipeline(build=False, scan_boards=True, scan_news=False, curate=False)
+            self.assertEqual(primary_check.call_count, 1)
+            self.assertEqual(curator_check.call_count, 0)
+            self.assertEqual(applier_check.call_count, 0)
+
+            with self.assertRaises(ValueError):
+                orch.apply_to("nonexistent-id")
+            self.assertEqual(applier_check.call_count, 1)
+            self.assertEqual(primary_check.call_count, 1)
+
+    def test_llm_agent_overrides_reject_mistakes_instead_of_ignoring_them(self) -> None:
+        base = {"provider": "ollama", "model": "A"}
+        cases = {
+            "non-object override": ({"ranker": "gemini"}, "must be an object"),
+            "typo'd key": ({"ranker": {"modle": "B"}}, "unknown key"),
+            "unknown agent": ({"rankr": {"model": "B"}}, "unknown agent"),
+            "bad number": ({"ranker": {"timeout_seconds": "abc"}}, "timeout_seconds is invalid"),
+        }
+        for label, (agents, expected) in cases.items():
+            with self.subTest(label):
+                with self.assertRaisesRegex(ValueError, expected):
+                    LLMConfig.from_dict({**base, "agents": agents})
+
+        cfg = LLMConfig.from_dict({**base, "agents": {"ranker": {"timeout_seconds": "300"}, "curator": {}}})
+        self.assertEqual(cfg.for_agent("ranker").timeout_seconds, 300)
+        self.assertEqual(set(cfg.agents), {"ranker"})
+
+    def test_ollama_does_not_retry_without_format_on_unrelated_400(self) -> None:
+        calls: list[dict] = []
+
+        def urlopen(req, timeout=60):
+            if req.full_url.endswith("/api/tags"):
+                raw = json.dumps({"models": [{"name": "m"}]}).encode()
+                return MagicMock(__enter__=lambda s: s, __exit__=lambda *a: False, read=lambda *_: raw)
+            calls.append(json.loads(req.data))
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error":"bad model"}'))
+
+        client = LocalLLMClient(provider="ollama", model="m")
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            with self.assertRaises(LocalLLMError):
+                client.chat_json("sys", "usr")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(client._json_format_unsupported)
+
+    def test_ensure_llms_checks_each_distinct_client_once(self) -> None:
+        self.config.llm = LLMConfig.from_dict(
+            {"provider": "ollama", "model": "m", "agents": {"ranker": {"model": "r"}}}
+        )
+        orch = JobScoutOrchestrator(config=self.config, storage=self.storage)
+        checked: list[str] = []
+        for client in {id(c): c for c in orch.agent_llms.values()}.values():
+            client.ensure_available = lambda model=client.model: checked.append(model)
+        orch._ensure_llms("scout", "applier", "ranker")
+        self.assertCountEqual(checked, ["m", "r"])
+        checked.clear()
+        orch._ensure_llms("applier")
+        self.assertEqual(checked, ["m"])
 
 
 if __name__ == "__main__":

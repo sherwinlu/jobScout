@@ -12,6 +12,7 @@ import urllib.request
 from typing import Any, Callable
 
 from jobscout.security import is_allowed_api_key_env
+from jobscout.storage import log
 
 _MAX_LLM_RESPONSE_BYTES = 5 * 1024 * 1024
 
@@ -408,10 +409,15 @@ class LocalLLMClient:
             try:
                 raw = self._post_json(f"{self.base_url}/api/chat", payload)
             except _NonRetryableLLMError as exc:
-                # Some builds (e.g. MLX-backed models) reject `format`. The prompts already
-                # ask for JSON and callers parse it tolerantly, so retry without it.
-                if "format" not in payload or "structured output is unavailable" not in str(exc):
+                # Some builds (e.g. MLX-backed models) reject `format`. Retry without it;
+                # JSON is now prompt-only (extract_json_payload parses bare/fenced JSON).
+                if "format" not in payload or "structured output is unavailable" not in str(exc).lower():
                     raise
+                if not self._json_format_unsupported:
+                    log(
+                        f"llm: {self.provider}/{self.model} rejects format=json; "
+                        "retrying without it (JSON is prompt-enforced)"
+                    )
                 self._json_format_unsupported = True
                 del payload["format"]
                 raw = self._post_json(f"{self.base_url}/api/chat", payload)
