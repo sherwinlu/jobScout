@@ -33,7 +33,7 @@ flowchart TD
     RLOAD["resume_loader.py (.md/.docx/.pdf)"] --> CFG
     RLOAD --> APPLY
 
-    LLM["LocalLLMClient (llm.py)"] ---|"pre-flight + inference"| SCOUT
+    LLM["LocalLLMClient (llm.py)<br/>one shared client, or one per agent via llm.agents"] ---|"pre-flight + inference"| SCOUT
     LLM ---|"score + tailor"| RANK
     LLM ---|"draft + custom Q&A"| APPLY
 
@@ -57,7 +57,7 @@ flowchart TD
 | `jobscout/config.py` | Loads JSON config into typed dataclasses (`ScoutConfig`, `CandidateConfig`, `TargetingConfig`, `LLMConfig`, `ApplierConfig`, `PolitenessConfig`) and resolves `.md`/`.docx`/`.pdf` documents. |
 | `jobscout/models.py` | Core data contracts: `Opportunity`, `ResumeProfile`, `RankedOpportunity`, `ApplicationDraft`. |
 | `jobscout/storage.py` | SQLite persistence (`scout.db`), `targets.json` state, private file/directory creation (`0700`/`0600`), and DB PII redaction. |
-| `jobscout/llm.py` | Stdlib HTTP client for local and cloud LLMs with exact local model verification, transient retry handling, and ordered backup failover. |
+| `jobscout/llm.py` | Stdlib HTTP client for local and cloud LLMs with exact local model verification, transient retry handling, ordered backup failover, per-agent clients (`llm.agents`), and a retry without `format` for Ollama builds that reject it. |
 | `jobscout/http_client.py` | Thread-safe, per-host throttled HTTP client with SSRF validation, `robots.txt` enforcement, bounded reads, gzip-bomb defense, and `Retry-After` backoff. |
 | `jobscout/security.py` | PII redaction for LLM prompts, untrusted prompt delimiter wrapping, CR/LF & XML control-char sanitization, ATS slug & `api_key_env` allowlist validation, POSIX permissions. |
 | `jobscout/xml_safe.py` | Safe XML parser using `defusedxml` when installed, or rejecting `<!DOCTYPE` / `<!ENTITY` before `ElementTree.fromstring`. |

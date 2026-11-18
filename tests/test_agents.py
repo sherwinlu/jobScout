@@ -3025,6 +3025,36 @@ class JobScoutAgentsTest(unittest.TestCase):
         self.assertIn("LLM (applier):", out)
         self.assertIn("gemini(gemini-2.5-flash, available=no - missing key)", out)
 
+    def test_agents_with_identical_overrides_share_one_client(self) -> None:
+        override = {"provider": "gemini", "model": "gemini-2.5-flash"}
+        self.config.llm = LLMConfig.from_dict(
+            {
+                "provider": "ollama",
+                "model": "m",
+                "agents": {"applier": override, "curator": dict(override), "ranker": {"model": "r"}},
+            }
+        )
+        orch = JobScoutOrchestrator(config=self.config, storage=self.storage)
+        self.assertIs(orch.applier.llm, orch.curator.llm)
+        self.assertIsNot(orch.applier.llm, orch.ranker.llm)
+        self.assertIs(orch.scout.llm, orch.llm)
+
+    def test_run_pipeline_checks_only_llms_it_will_use(self) -> None:
+        orch = JobScoutOrchestrator(config=self.config, storage=self.storage, llm=OfflineLLM())
+        orch.scout.run = MagicMock(return_value=MagicMock(opportunities=[], new_targets=[]))
+        orch.ranker.run = MagicMock(return_value=[])
+        orch.curator.run = MagicMock()
+        cases = [
+            (dict(scan_boards=False, scan_news=False, curate=False), ["scout"]),
+            (dict(scan_boards=True, scan_news=False, curate=False), ["scout", "ranker"]),
+            (dict(scan_boards=True, scan_news=True, curate=True), ["scout", "ranker", "curator"]),
+        ]
+        for kwargs, expected in cases:
+            with self.subTest(kwargs), patch.object(orch, "_ensure_llms") as ensure:
+                self.config.curation.enabled = True
+                orch.run_pipeline(**kwargs)
+                ensure.assert_called_once_with(*expected)
+
     def test_ollama_retries_without_json_format_when_server_rejects_it(self) -> None:
         bodies: list[dict] = []
 

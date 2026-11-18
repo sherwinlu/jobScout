@@ -155,7 +155,7 @@ ollama serve
 You can also override provider/model/base URL per invocation with `--llm-provider`, `--llm-model`, and `--llm-base-url`, or point `"api_key_env"` in `profile.json` to a custom environment variable name.
 
 **Ordered Backup LLMs & Retries:**
-Configure `"backups"` in `"llm"` with an ordered list of fallback providers (as many as you want). Transient errors (e.g., timeouts, connection resets, HTTP `429` / `503`) are retried on the same LLM up to `"max_retries"` (default `2`). Non-retryable failures (e.g., server down / connection refused, missing API key, HTTP `401` / `403` / `404`) automatically fail over to the next configured backup:
+Configure `"backups"` in `"llm"` with an ordered list of fallback providers (as many as you want). Transient errors (e.g., timeouts, connection resets, HTTP `429` / `503`) are retried on the same LLM up to `"max_retries"` (default `2`). Each retry waits up to `"timeout_seconds"` again, so one hung call can take `timeout_seconds × (max_retries + 1)` before the run moves on; keep that in mind if you raise the timeout for a slow local model. Non-retryable failures (e.g., server down / connection refused, missing API key, HTTP `401` / `403` / `404`) automatically fail over to the next configured backup:
 ```json
 "llm": {
   "provider": "ollama",
