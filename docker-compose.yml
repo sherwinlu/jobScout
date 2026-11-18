@@ -1,0 +1,38 @@
+services:
+  jobscout:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jobscout:latest
+    stdin_open: true
+    tty: true
+    environment:
+      JOB_SCOUT_HOME: /data
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - "${JOB_SCOUT_DATA_DIR:-${HOME}/job-scout}:/data"
+
+  jobscout-browser:
+    profiles: ["browser"]
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+    image: jobscout:browser
+    stdin_open: true
+    tty: true
+    environment:
+      JOB_SCOUT_HOME: /data
+      DISPLAY: ${DISPLAY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - "${JOB_SCOUT_DATA_DIR:-${HOME}/job-scout}:/data"

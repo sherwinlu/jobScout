@@ -1,0 +1,7 @@
+# Core Scout + Ranker + .docx extraction + Ollama/MLX HTTP integration use Python 3.10+ stdlib only.
+# Install Playwright for interactive browser form-filling in the Applier agent:
+playwright>=1.48.0
+# Optional: reliable PDF text extraction when your resume is a .pdf:
+pypdf>=5.0.0
+# Optional: hardened XML parsing for untrusted RSS/Atom feeds and .docx files:
+defusedxml>=0.7.1

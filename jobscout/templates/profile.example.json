@@ -1,0 +1,123 @@
+{
+  "candidate": {
+    "first_name": "Your",
+    "last_name": "Name",
+    "full_name": "Your Name",
+    "email": "you@example.com",
+    "phone": "",
+    "location": "Remote / United States",
+    "city": "",
+    "state": "",
+    "country": "United States",
+    "linkedin": "",
+    "github": "",
+    "website": "",
+    "work_authorization": "",
+    "require_sponsorship": "",
+    "desired_compensation": "",
+    "notice_period": "",
+    "custom_answers": {
+      "why_company": ""
+    }
+  },
+  "resumes": [
+    {
+      "id": "default",
+      "label": "Primary Resume",
+      "target_roles": ["software engineer", "engineering"],
+      "target_keywords": ["python", "distributed systems", "cloud"],
+      "file_path": "resume.md"
+    }
+  ],
+  "cover_letters": [
+    {
+      "id": "default_cl",
+      "label": "Primary Cover Letter",
+      "target_roles": ["software engineer", "engineering"],
+      "target_keywords": ["python", "distributed systems", "cloud"],
+      "file_path": ""
+    }
+  ],
+  "targeting": {
+    "role_summary": "Senior / Staff / Leadership Software Engineering roles",
+    "skills": [
+      "Software Architecture",
+      "Distributed Systems",
+      "Cloud Infrastructure",
+      "Python"
+    ],
+    "dealbreakers": [],
+    "filters": {
+      "title_must_match_all": [
+        "\\b(software|platform|infrastructure|backend|full[- ]stack|ml|ai|engineering)\\b"
+      ],
+      "title_exclude": [
+        "\\b(intern|sales|marketing|recruit\\w*|talent|finance|legal|hr)\\b"
+      ],
+      "allowed_locations": [
+        "remote",
+        "anywhere",
+        "united states"
+      ],
+      "allow_non_us": false
+    },
+    "keyword_weights": {
+      "python": 2,
+      "distributed systems": 2,
+      "cloud": 1,
+      "remote": 1
+    },
+    "domain_keywords": [],
+    "min_match_score": 55,
+    "auto_tailor_verdicts": ["strong_match", "good_match"],
+    "seed_companies": [],
+    "manual_targets": {
+      "greenhouse": [],
+      "lever": [],
+      "ashby": []
+    },
+    "news_feeds": [],
+    "fetch_article_body": false,
+    "sources": {
+      "remotive": false,
+      "remoteok": false,
+      "hn_who_is_hiring": true,
+      "news_feeds": false
+    }
+  },
+  "llm": {
+    "provider": "ollama",
+    "base_url": "http://localhost:11434",
+    "model": "qwen2.5:7b",
+    "api_key_env": "",
+    "timeout_seconds": 60,
+    "max_retries": 2,
+    "retry_backoff_seconds": 1.0,
+    "max_news_articles_per_run": 25,
+    "max_ranker_evals_per_run": 30,
+    "backups": []
+  },
+  "applier": {
+    "headless": false,
+    "timeout_ms": 20000
+  },
+  "politeness": {
+    "respect_robots_txt": true,
+    "min_delay_per_host_seconds": 0.5,
+    "max_crawl_delay_seconds": 10.0,
+    "max_retries_on_429": 1,
+    "user_agent": "job-scout/2.0",
+    "contact_email": ""
+  },
+  "curation": {
+    "enabled": true,
+    "auto_discover_feeds": true,
+    "auto_discover_ats": true,
+    "auto_prune": true,
+    "prune_bad_opportunities": true,
+    "min_evals_before_prune": 3,
+    "prune_score_threshold": 40.0,
+    "max_new_feeds_per_run": 5,
+    "max_new_boards_per_run": 10
+  }
+}

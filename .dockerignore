@@ -1,0 +1,28 @@
+# Git & CI
+.git
+.github
+.gitignore
+.DS_Store
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.venv
+venv
+.pytest_cache
+
+# Personal profile, resumes, cover letters & runtime data (never bake into image)
+.env
+.env.*
+profile.json
+resume.md
+resumes/*
+!resumes/.gitkeep
+cover_letters/*
+!cover_letters/.gitkeep
+data
+*.db
+*.sqlite
+screenshots
+tests

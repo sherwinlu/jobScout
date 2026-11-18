@@ -1,0 +1,27 @@
+# OS & backups
+.DS_Store
+*.bak
+.env
+.env.*
+
+# Personal profile, resumes & cover letters (keep private)
+profile.json
+resume.md
+resumes/*
+!resumes/.gitkeep
+cover_letters/*
+!cover_letters/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Local runtime state / artifacts if stored in-repo
+data/
+*.db
+*.sqlite
+screenshots/

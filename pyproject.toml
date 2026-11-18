@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "job-scout"
+dynamic = ["version"]
+description = "Multi-agent job discovery, local-LLM skillset ranking, and human-approved browser application assistant."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [
+  { name = "sherwinlu" },
+]
+keywords = ["jobs", "agents", "llm", "ollama", "mlx", "playwright", "career"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.optional-dependencies]
+browser = ["playwright>=1.48.0"]
+pdf = ["pypdf>=5.0.0"]
+xml = ["defusedxml>=0.7.1"]
+all = ["playwright>=1.48.0", "pypdf>=5.0.0", "defusedxml>=0.7.1"]
+
+[project.scripts]
+job-scout = "jobscout.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/sherwinlu/jobScout"
+Repository = "https://github.com/sherwinlu/jobScout"
+Issues = "https://github.com/sherwinlu/jobScout/issues"
+
+[tool.setuptools]
+packages = ["jobscout", "jobscout.agents"]
+py-modules = ["job_scout"]
+
+[tool.setuptools.package-data]
+jobscout = ["templates/*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "jobscout.__version__" }
