@@ -1456,6 +1456,62 @@ class JobScoutAgentsTest(unittest.TestCase):
             self.assertTrue(any(flagged in q for q in draft.unfilled_questions), flagged)
             self.assertNotIn(flagged, filled)
 
+    @unittest.skipUnless(sync_playwright, "playwright not installed")
+    def test_applier_reads_lever_question_labels_and_flags_unanswered_required_choices(self) -> None:
+        # Markup copied from a live Lever form: the question text is a div.application-label, not a <label>.
+        html = """<!doctype html><html><body><form id="application-form"><ul>
+          <li class="application-question custom-question"><div>
+            <div class="application-label full-width textarea"><div class="text">What is the greatest impact you have had in a prior role?<span class="required">✱</span></div></div>
+            <div class="application-field full-width required-field"><textarea name="cards[x][field0]" required></textarea></div></div></li>
+          <li class="application-question custom-question"><div>
+            <div class="application-label full-width multiple-choice"><div class="text">What is the highest level of education you have completed?<span class="required">✱</span></div></div>
+            <div class="application-field full-width required-field"><ul>
+              <li><label><input type="radio" name="cards[x][field3]" value="a" required><span>High school diploma</span></label></li>
+              <li><label><input type="radio" name="cards[x][field3]" value="b" required><span>Graduate/Master's degree or above</span></label></li></ul></div></div></li>
+          <li class="application-question custom-question"><div>
+            <div class="application-label full-width multiple-choice"><div class="text">Do you want our newsletter?</div></div>
+            <div class="application-field full-width"><ul>
+              <li><label><input type="radio" name="cards[x][field4]" value="y"><span>Yes</span></label></li>
+              <li><label><input type="radio" name="cards[x][field4]" value="n"><span>No</span></label></li></ul></div></div></li>
+          <li class="application-question custom-question"><div>
+            <div class="application-label full-width multiple-choice"><div class="text">Already answered by the page</div></div>
+            <div class="application-field full-width required-field"><ul>
+              <li><label><input type="radio" name="cards[x][field5]" value="y" required checked><span>Yes</span></label></li>
+              <li><label><input type="radio" name="cards[x][field5]" value="n" required><span>No</span></label></li></ul></div></div></li>
+          <li class="application-question custom-question"><div>
+            <div class="application-label full-width"><div class="text">I agree to the privacy notice<span class="required">✱</span></div></div>
+            <div class="application-field"><label><input type="checkbox" name="cards[x][field6]" required><span>I agree</span></label></div></div></li>
+          </ul></form></body></html>"""
+        llm = PickLLM(lambda prompt: {"answer": "ANSWER FOR: " + prompt.split("<untrusted_form_question>")[1].split("</")[0].strip()[:40]})
+        cfg = ScoutConfig(home_dir=self.home / "lever_form", candidate=CandidateConfig(), targeting=TargetingConfig())
+        applier = ApplierAgent(cfg, Storage(cfg), llm)
+        opp = Opportunity(id="l:1", source="lever", company="Co", title="CTO", location="", url="https://x.example.org", text="")
+        draft = ApplicationDraft(job_id="l:1", company="Co", title="CTO", url=opp.url, ats="lever", fields={})
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                try:
+                    page = browser.new_page()
+                    page.set_content(html)
+                    applier._fill_visible_form(page, page.locator("#application-form"), opp, draft, ResumeProfile(id="r", label="R", text="r"))
+                    checked = page.locator("input:checked").count()
+                finally:
+                    browser.close()
+        except Exception as exc:  # no browser binary installed
+            if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc):
+                self.skipTest("chromium not installed")
+            raise
+
+        question = "What is the greatest impact you have had in a prior role?"
+        self.assertTrue(any(question in prompt for _, prompt in llm.prompts))  # the model sees the real question
+        self.assertTrue(any(f.startswith(question) and "ANSWER FOR: What is the greatest impact" in f for f in draft.filled_inputs))
+        self.assertFalse(any("cards[" in f for f in draft.filled_inputs))
+        self.assertEqual(
+            sorted(draft.unfilled_questions),
+            sorted(["What is the highest level of education you have completed?", "I agree"]),
+        )
+        self.assertEqual(checked, 1)  # only the page's own pre-checked radio; nothing was ticked for the user
+
     @staticmethod
     def _plain_resume(name: str, jobs: list[tuple[str, str, str, list[str]]], education: str) -> str:
         """A resume shaped like text extracted from a .docx: caps headings, dated job lines, no bullets."""

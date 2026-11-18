@@ -712,6 +712,7 @@ class ApplierAgent(BaseAgent):
             self._fill_text_controls(page, app_form, opp, draft, resume, handled)
 
         self._fill_eeo_choices(app_form, draft)
+        self._flag_unanswered_required_choices(app_form, draft)
 
     def _fill_text_controls(
         self,
@@ -878,13 +879,13 @@ class ApplierAgent(BaseAgent):
 
     @staticmethod
     def _display_label(descriptor: str, max_len: int = 80) -> str:
-        """Human-readable control label: the first descriptor part, minus duplicates and required `*` markers.
+        """Human-readable control label: the first descriptor part, minus duplicates and required `*`/`✱` markers.
 
         `_describe_control` joins label text, aria-label, placeholder, name, and id with " | ", which is
         useful for matching but noisy (and repeats the label) when shown in the review prompt.
         """
         for part in (descriptor or "").split(" | "):
-            label = re.sub(r"\s*\*+\s*$", "", part.strip()).strip()
+            label = re.sub(r"\s*[*\u2731\u2217]+\s*$", "", part.strip()).strip()
             if label:
                 return label[:max_len]
         return ""
@@ -974,6 +975,61 @@ class ApplierAgent(BaseAgent):
             except Exception:
                 continue
 
+    def _flag_unanswered_required_choices(self, app_form: Any, draft: ApplicationDraft) -> None:
+        """List required radio groups, checkboxes and selects that are still unanswered for the reviewer.
+
+        Only EEO choices are ever filled automatically, so every other required choice would otherwise
+        be silently left blank (and then fail validation on submit). Nothing here is ticked or selected.
+        """
+        seen_groups: set[str] = set()
+        choices = app_form.locator("input[type='radio'], input[type='checkbox']")
+        for idx in range(choices.count()):
+            el = choices.nth(idx)
+            try:
+                if not el.is_visible() or not self._is_required_attr(el):
+                    continue
+                info = self._describe_choice(el)
+                is_radio = info.get("type") == "radio"
+                group_key = (info.get("name") or info.get("group") or f"#{idx}") if is_radio else f"#{idx}"
+                if group_key in seen_groups:
+                    continue
+                seen_groups.add(group_key)
+                if is_radio:
+                    name = info.get("name", "")
+                    members = app_form.locator("input[type='radio']").all()
+                    if any(m.is_checked() for m in members if (m.get_attribute("name") or "") == name):
+                        continue
+                    label = info.get("group") or name
+                else:
+                    if el.is_checked():
+                        continue
+                    label = info.get("option") or info.get("group") or info.get("name", "")
+                if match_eeo_category(f"{info.get('group', '')} {info.get('name', '')}"):
+                    continue  # EEO choices are reported under their own [EEO] notes
+                if label:
+                    draft.unfilled_questions.append(self._display_label(label, 120))
+            except Exception:
+                continue
+
+        selects = app_form.locator("select")
+        for idx in range(selects.count()):
+            el = selects.nth(idx)
+            try:
+                if not el.is_visible() or not self._is_required_attr(el) or el.input_value().strip():
+                    continue
+                descriptor = self._describe_control(el)
+                if descriptor and not match_eeo_category(descriptor):
+                    draft.unfilled_questions.append(self._display_label(descriptor, 120))
+            except Exception:
+                continue
+
+    @staticmethod
+    def _is_required_attr(el: Any) -> bool:
+        try:
+            return el.get_attribute("required") is not None or (el.get_attribute("aria-required") or "").lower() == "true"
+        except Exception:
+            return False
+
     @staticmethod
     def _describe_choice(el: Any) -> dict[str, str]:
         """Return a radio/checkbox's own option label plus its group question (legend) and name."""
@@ -988,7 +1044,7 @@ class ApplierAgent(BaseAgent):
                     let group = '';
                     if (wrap) {
                         const legend = wrap.querySelector('legend') ||
-                            Array.from(wrap.querySelectorAll('label, .label')).find(l => !l.querySelector('input') && !l.htmlFor);
+                            Array.from(wrap.querySelectorAll('label, .label, .application-label')).find(l => !l.querySelector('input') && !l.htmlFor);
                         if (legend) group = legend.innerText;
                     }
                     return {option, group, name: e.getAttribute('name') || '', type: e.type};
@@ -1012,7 +1068,7 @@ class ApplierAgent(BaseAgent):
                     if (parentLabel) parts.push(parentLabel.innerText);
                     const fieldWrap = e.closest('.field, .application-question, [data-field]');
                     if (fieldWrap) {
-                        const lbl = fieldWrap.querySelector('label, .label');
+                        const lbl = fieldWrap.querySelector('label, .label, .application-label');
                         if (lbl) parts.push(lbl.innerText);
                     }
                     parts.push(e.getAttribute('aria-label') || '');
