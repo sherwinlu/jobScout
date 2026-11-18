@@ -33,13 +33,20 @@ class JobScoutOrchestrator:
         self.storage = storage or Storage(self.config)
         self.llm = llm or LocalLLMClient.from_config(self.config.llm)
         # An injected client is used by every agent; otherwise `llm.agents` may give an
-        # agent its own provider/model. Agents without an override share self.llm.
-        self._agent_llms = {
-            name: self.llm
-            if llm is not None or name not in self.config.llm.agents
-            else LocalLLMClient.from_config(self.config.llm.for_agent(name))
-            for name in LLMConfig.AGENT_NAMES
-        }
+        # agent its own provider/model. Agents without an override share self.llm, and
+        # agents whose resolved config is identical share one client (one health check).
+        self._agent_llms: dict[str, LocalLLMClient] = {}
+        resolved: list[tuple[LLMConfig, LocalLLMClient]] = []
+        for name in LLMConfig.AGENT_NAMES:
+            if llm is not None or name not in self.config.llm.agents:
+                self._agent_llms[name] = self.llm
+                continue
+            cfg = self.config.llm.for_agent(name)
+            client = next((c for existing, c in resolved if existing == cfg), None)
+            if client is None:
+                client = LocalLLMClient.from_config(cfg)
+                resolved.append((cfg, client))
+            self._agent_llms[name] = client
         self.scout = ScoutAgent(self.config, self.storage, self._agent_llms["scout"])
         self.ranker = RankerAgent(self.config, self.storage, self._agent_llms["ranker"])
         self.applier = ApplierAgent(self.config, self.storage, self._agent_llms["applier"])
