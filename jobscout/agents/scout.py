@@ -240,8 +240,35 @@ class ScoutAgent(BaseAgent):
             )
         return out
 
+    def _fetch_ashby_board_page(self, slug: str, display: str) -> list[Opportunity]:
+        """Read postings from the public board page when the posting API's robots.txt is unavailable."""
+        page = self.get_bytes(f"https://jobs.ashbyhq.com/{slug}", accept="text/html").decode("utf-8", "replace")
+        m = re.search(r"window\.__appData\s*=\s*", page)
+        if not m:
+            return []
+        data, _ = json.JSONDecoder().raw_decode(page[m.end():])
+        postings = ((data.get("jobBoard") or {}).get("jobPostings")) or []
+        out: list[Opportunity] = []
+        for j in postings:
+            loc = j.get("locationName") or ""
+            if (j.get("workplaceType") or "").lower() == "remote":
+                loc += " remote"
+            title = j.get("title")
+            out.append(
+                self._make_job(
+                    "ashby", display, title, loc,
+                    f"https://jobs.ashbyhq.com/{slug}/{j.get('id')}",
+                    f"{title} {loc} {j.get('employmentType') or ''}", j.get("id"),
+                    metadata={"ats": "ashby", "slug": slug, "via": "board-page"},
+                )
+            )
+        return out
+
     def fetch_ashby(self, slug: str, display: str) -> list[Opportunity]:
-        data = self.get_json(self._ATS_META_URLS["ashby"].format(slug=slug))
+        try:
+            data = self.get_json(self._ATS_META_URLS["ashby"].format(slug=slug))
+        except RobotsDisallowedError:
+            return self._fetch_ashby_board_page(slug, display)
         out: list[Opportunity] = []
         for j in data.get("jobs", []):
             loc = j.get("location") or ""
@@ -640,6 +667,11 @@ class ScoutAgent(BaseAgent):
         if not is_valid_ats_slug(slug):
             return False, ""
         url = self._ATS_META_URLS.get(ats, "").format(slug=slug)
+        if ats == "ashby":
+            try:
+                return len(self.fetch_ashby(slug, slug)) > 0, ""
+            except Exception:
+                return False, ""
         if url:
             try:
                 data = self.get_json(url)

@@ -879,6 +879,33 @@ class JobScoutAgentsTest(unittest.TestCase):
         self.assertIn("Acme Health", companies)
         self.assertEqual(len(leads), 1)
 
+    def test_ashby_falls_back_to_board_page_when_api_robots_unavailable(self) -> None:
+        scout = ScoutAgent(self.config, self.storage, OfflineLLM())
+        page = (
+            "<script>window.__appData = "
+            + json.dumps({"jobBoard": {"jobPostings": [
+                {"id": "abc", "title": "Head of Engineering", "locationName": "North America",
+                 "workplaceType": "Remote", "employmentType": "FullTime"},
+            ]}})
+            + ";</script>"
+        )
+
+        def fake_bytes(url: str, accept: str = "*/*") -> bytes:
+            if "api.ashbyhq.com" in url:
+                raise RobotsDisallowedError(url, "robots.txt returned HTTP 401")
+            self.assertEqual(url, "https://jobs.ashbyhq.com/acme")
+            return page.encode()
+
+        with patch.object(scout, "get_bytes", side_effect=fake_bytes):
+            jobs = scout.fetch_ashby("acme", "Acme")
+            ok, _ = scout.probe("ashby", "acme")
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "Head of Engineering")
+        self.assertEqual(jobs[0].url, "https://jobs.ashbyhq.com/acme/abc")
+        self.assertIn("remote", jobs[0].location)
+        self.assertTrue(ok)
+
     def test_custom_cover_letter_only_generated_when_required(self) -> None:
         # 1. Detection helpers distinguish required vs optional vs unmentioned
         self.assertFalse(is_cover_letter_required_in_text("Build distributed cloud systems."))
