@@ -906,6 +906,41 @@ class JobScoutAgentsTest(unittest.TestCase):
         self.assertIn("remote", jobs[0].location)
         self.assertTrue(ok)
 
+    def test_ashby_board_page_without_app_data_yields_no_jobs(self) -> None:
+        scout = ScoutAgent(self.config, self.storage, OfflineLLM())
+
+        def fake_bytes(url: str, accept: str = "*/*") -> bytes:
+            if "api.ashbyhq.com" in url:
+                raise RobotsDisallowedError(url, "robots.txt returned HTTP 401")
+            return b"<html>moved</html>"
+
+        with patch.object(scout, "get_bytes", side_effect=fake_bytes):
+            self.assertEqual(scout.fetch_ashby("acme", "Acme"), [])
+            self.assertEqual(scout.probe("ashby", "acme"), (False, ""))
+
+    def test_resolve_company_rejects_ashby_board_owned_by_another_company(self) -> None:
+        scout = ScoutAgent(self.config, self.storage, OfflineLLM())
+
+        def board(org: str) -> bytes:
+            data = {"organization": {"name": org}, "jobBoard": {
+                "teams": [{"id": "t1", "name": "Platform"}],
+                "jobPostings": [{"id": "j1", "title": "Engineer", "teamId": "t1"}],
+            }}
+            return ("<script>window.__appData = " + json.dumps(data) + ";</script>").encode()
+
+        def fake_bytes(url: str, accept: str = "*/*") -> bytes:
+            if "api.ashbyhq.com" in url:
+                raise RobotsDisallowedError(url, "robots.txt returned HTTP 401")
+            if "jobs.ashbyhq.com/titan" in url:
+                return board("Titan Pharmaceuticals")
+            return board("Nevis Wealth")
+
+        with patch.object(scout, "get_bytes", side_effect=fake_bytes):
+            self.assertIsNone(scout.resolve_company("Titan Wealth"))
+            self.assertEqual(scout.resolve_company("Nevis"), {"ats": "ashby", "slug": "nevis"})
+            jobs = scout.fetch_ashby("nevis", "Nevis")
+        self.assertIn("Platform", jobs[0].text)
+
     def test_custom_cover_letter_only_generated_when_required(self) -> None:
         # 1. Detection helpers distinguish required vs optional vs unmentioned
         self.assertFalse(is_cover_letter_required_in_text("Build distributed cloud systems."))
