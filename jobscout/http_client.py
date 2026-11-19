@@ -95,6 +95,31 @@ def validate_public_url(url: str, allow_private_hosts: bool = False) -> str | No
     return None
 
 
+# Keyed APIs are rate limited per key; stay well under typical free-tier limits.
+_API_MIN_DELAY_SECONDS = 2.5
+# Headers safe to send to a redirect target on another host.
+_CROSS_HOST_HEADERS = frozenset({"user-agent", "accept", "accept-encoding", "from"})
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follows redirects only to public URLs and never forwards custom headers to another host."""
+
+    def __init__(self, allow_private_hosts: bool = False) -> None:
+        self.allow_private_hosts = allow_private_hosts
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        err = validate_public_url(newurl, allow_private_hosts=self.allow_private_hosts)
+        if err:
+            raise RobotsDisallowedError(newurl, f"unsafe redirect target ({err})")
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None and urllib.parse.urlsplit(newurl).netloc.lower() != req.host.lower():
+            # Never forward an API key (or any custom header) to a different host.
+            for name in list(new_req.headers):
+                if name.lower() not in _CROSS_HOST_HEADERS:
+                    del new_req.headers[name]
+        return new_req
+
+
 class PoliteHttpClient:
     """HTTP client enforcing URL safety, robots.txt, Crawl-delay, per-host rate limits, and 429 backoff."""
 
@@ -109,6 +134,7 @@ class PoliteHttpClient:
         contact_email: str = "",
         allow_private_hosts: bool = False,
         max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
+        robots_exempt_hosts: frozenset[str] | set[str] = frozenset(),
         opener: Callable[[urllib.request.Request, int], Any] | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
         clock_fn: Callable[[], float] = time.monotonic,
@@ -129,6 +155,9 @@ class PoliteHttpClient:
         self.max_retries = max(0, int(max_retries))
         self.allow_private_hosts = bool(allow_private_hosts)
         self.max_response_bytes = max(1024, int(max_response_bytes))
+        # Official key-authenticated API hosts: their robots.txt targets crawlers, and the provider's
+        # API terms (accepted when the key was issued) govern use instead. All other checks still apply.
+        self.robots_exempt_hosts = frozenset(h.lower() for h in robots_exempt_hosts)
         self._opener = opener or self._build_safe_opener(self.allow_private_hosts)
         self.sleep_fn = sleep_fn
         self.clock_fn = clock_fn
@@ -141,14 +170,7 @@ class PoliteHttpClient:
 
     @staticmethod
     def _build_safe_opener(allow_private_hosts: bool) -> Callable[[urllib.request.Request, int], Any]:
-        class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                err = validate_public_url(newurl, allow_private_hosts=allow_private_hosts)
-                if err:
-                    raise RobotsDisallowedError(newurl, f"unsafe redirect target ({err})")
-                return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-        url_opener = urllib.request.build_opener(_SafeRedirectHandler())
+        url_opener = urllib.request.build_opener(_SafeRedirectHandler(allow_private_hosts))
         return lambda req, timeout: url_opener.open(req, timeout=timeout)
 
     def _lock_for(self, key: str) -> threading.Lock:
@@ -281,6 +303,8 @@ class PoliteHttpClient:
             return True, self.min_delay_seconds, ""
 
         origin, host = self._origin_and_host(url)
+        if host in self.robots_exempt_hosts and origin.startswith("https://"):
+            return True, max(self.min_delay_seconds, _API_MIN_DELAY_SECONDS), ""
         policy = self._get_robots_policy(origin, host)
         if policy.disallow_all:
             return False, 0.0, policy.reason or "disallowed by robots.txt"
@@ -312,7 +336,9 @@ class PoliteHttpClient:
                 pass
         return max(default_delay, 2.0)
 
-    def fetch_bytes(self, url: str, accept: str = "*/*") -> bytes:
+    def fetch_bytes(
+        self, url: str, accept: str = "*/*", headers: dict[str, str] | None = None
+    ) -> bytes:
         allowed, delay, reason = self.can_fetch(url)
         if not allowed:
             raise RobotsDisallowedError(url, reason)
@@ -321,7 +347,10 @@ class PoliteHttpClient:
         host_lock = self._lock_for(f"host:{host}")
 
         for attempt in range(self.max_retries + 1):
-            req = urllib.request.Request(url, headers=self._build_headers(accept))
+            req_headers = self._build_headers(accept)
+            for name, value in (headers or {}).items():
+                req_headers[strip_header_crlf(name)] = strip_header_crlf(value)
+            req = urllib.request.Request(url, headers=req_headers)
             with host_lock:
                 self._enforce_host_delay_locked(host, delay)
                 try:

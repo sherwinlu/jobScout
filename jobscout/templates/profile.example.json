@@ -109,7 +109,15 @@
       "remotive": false,
       "remoteok": false,
       "hn_who_is_hiring": true,
-      "news_feeds": false
+      "news_feeds": false,
+      "adzuna": false,
+      "usajobs": false,
+      "arbeitnow": false
+    },
+    "job_search": {
+      "queries": [],
+      "country": "us",
+      "location": ""
     }
   },
   "llm": {

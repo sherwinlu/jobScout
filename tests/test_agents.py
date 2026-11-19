@@ -1050,6 +1050,110 @@ Career page links are in the comments
         with self.assertRaises(ValueError):
             TargetingConfig.from_dict({"filters": {"title_filter": "strict"}})
 
+    def test_keyed_api_hosts_skip_robots_but_keep_other_checks(self) -> None:
+        calls: list[str] = []
+
+        class Resp:
+            status = 200
+            headers: dict = {}
+
+            def __init__(self, body: bytes) -> None:
+                self._body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, *args):
+                body, self._body = self._body, b""
+                return body
+
+        def opener(req, timeout):
+            calls.append(req.full_url)
+            if req.full_url.endswith("/robots.txt"):
+                return Resp(b"User-agent: *\nDisallow: /\n")
+            return Resp(b"{}")
+
+        client = PoliteHttpClient(
+            user_agent="job-scout/2.0", opener=opener, sleep_fn=lambda s: None,
+            robots_exempt_hosts={"api.keyed.example"},
+        )
+        self.assertEqual(client.fetch_bytes("https://api.keyed.example/v1/x", headers={"Authorization-Key": "k"}), b"{}")
+        self.assertNotIn("https://api.keyed.example/robots.txt", calls)
+        with self.assertRaises(RobotsDisallowedError):  # other hosts still honor robots.txt
+            client.fetch_bytes("https://other.example/v1/x")
+        with self.assertRaises(RobotsDisallowedError):  # plain http is never exempt
+            client.fetch_bytes("http://api.keyed.example/v1/x")
+
+    def test_redirect_to_another_host_drops_custom_headers(self) -> None:
+        import io
+
+        from jobscout.http_client import _SafeRedirectHandler
+
+        req = urllib.request.Request(
+            "https://api.keyed.example/x", headers={"Authorization-Key": "secret", "User-Agent": "ua", "Accept": "a"}
+        )
+        handler = _SafeRedirectHandler()
+        other = handler.redirect_request(req, io.BytesIO(b""), 302, "Found", {}, "https://93.184.216.34/y")
+        self.assertNotIn("authorization-key", {k.lower() for k in other.headers})
+        self.assertIn("user-agent", {k.lower() for k in other.headers})
+        same = handler.redirect_request(req, io.BytesIO(b""), 302, "Found", {}, "https://api.keyed.example/z")
+        self.assertIn("authorization-key", {k.lower() for k in same.headers})
+
+    def test_search_queries_fall_back_to_resume_target_roles(self) -> None:
+        cfg = self._unknown_ats_config("queries")
+        cfg.resumes = [
+            ResumeProfile(id="a", label="A", file_path="", text="x", target_roles=["Technical Product Manager", "Support Engineer"]),
+            ResumeProfile(id="b", label="B", file_path="", text="y", target_roles=["support engineer", "Solutions Lead"]),
+        ]
+        scout = ScoutAgent(cfg, Storage(cfg), OfflineLLM())
+        self.assertEqual(scout.search_queries(), ["Technical Product Manager", "Support Engineer", "Solutions Lead"])
+        cfg.targeting.search_queries = ["customer success manager"]
+        self.assertEqual(scout.search_queries(), ["customer success manager"])
+
+    def test_aggregator_sources_parse_results_and_require_keys(self) -> None:
+        cfg = self._unknown_ats_config("aggregators")
+        cfg.targeting.search_queries = ["support engineer"]
+        cfg.politeness.contact_email = "me@example.com"
+        scout = ScoutAgent(cfg, Storage(cfg), OfflineLLM())
+        requested: list[tuple[str, dict | None]] = []
+
+        def fake_json(url: str, headers=None):
+            requested.append((url, headers))
+            if "adzuna" in url:
+                return {"results": [{"id": "9", "title": "Support Engineer", "company": {"display_name": "Acme"},
+                                     "location": {"display_name": "Austin, TX"}, "description": "Help customers",
+                                     "redirect_url": "https://www.adzuna.com/land/ad/9"}]}
+            if "usajobs" in url:
+                return {"SearchResult": {"SearchResultItems": [{"MatchedObjectId": "55", "MatchedObjectDescriptor": {
+                    "PositionID": "ABC-1", "PositionTitle": "IT Specialist", "OrganizationName": "NASA",
+                    "PositionLocationDisplay": "Anywhere in the U.S. (remote job)",
+                    "PositionURI": "https://www.usajobs.gov/job/55",
+                    "UserArea": {"Details": {"JobSummary": "Support systems"}}, "QualificationSummary": "5 yrs"}}]}}
+            return {"data": [{"slug": "s1", "company_name": "Firma", "title": "Support", "location": "Berlin",
+                              "remote": True, "url": "https://www.arbeitnow.com/jobs/s1", "description": "<p>x</p>"}]}
+
+        with patch.object(scout, "get_json", side_effect=fake_json):
+            with patch.dict("os.environ", {}, clear=False):
+                for var in ("ADZUNA_APP_ID", "ADZUNA_APP_KEY", "USAJOBS_API_KEY"):
+                    os.environ.pop(var, None)
+                with self.assertRaises(ValueError):
+                    scout.fetch_adzuna()
+                with self.assertRaises(ValueError):
+                    scout.fetch_usajobs()
+            with patch.dict("os.environ", {"ADZUNA_APP_ID": "id", "ADZUNA_APP_KEY": "key", "USAJOBS_API_KEY": "uk"}):
+                adz, usa = scout.fetch_adzuna(), scout.fetch_usajobs()
+            arb = scout.fetch_arbeitnow()
+
+        self.assertEqual((adz[0].id, adz[0].company, adz[0].location), ("adzuna:Acme:9", "Acme", "Austin, TX"))
+        self.assertEqual(adz[0].metadata["attribution"], "Jobs by Adzuna (https://www.adzuna.com)")
+        self.assertIn("what=support+engineer", requested[0][0])
+        self.assertEqual((usa[0].company, usa[0].url), ("NASA", "https://www.usajobs.gov/job/55"))
+        self.assertEqual(requested[1][1], {"Authorization-Key": "uk", "User-Agent": "me@example.com"})
+        self.assertEqual((arb[0].company, arb[0].location), ("Firma", "Berlin remote"))
+
     def test_custom_cover_letter_only_generated_when_required(self) -> None:
         # 1. Detection helpers distinguish required vs optional vs unmentioned
         self.assertFalse(is_cover_letter_required_in_text("Build distributed cloud systems."))

@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import os
 import re
 import urllib.error
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -24,7 +26,14 @@ from jobscout.xml_safe import parse_xml_bytes
 SOURCE_ATTRIBUTION = {
     "remotive": "Remotive (https://remotive.com)",
     "remoteok": "RemoteOK (https://remoteok.com)",
+    "adzuna": "Jobs by Adzuna (https://www.adzuna.com)",
+    "usajobs": "USAJOBS (https://www.usajobs.gov)",
+    "arbeitnow": "Arbeitnow (https://www.arbeitnow.com)",
 }
+
+# Official key-authenticated API hosts exempt from the robots.txt check (see PoliteHttpClient).
+KEYED_API_HOSTS = frozenset({"api.adzuna.com", "data.usajobs.gov"})
+_MAX_SEARCH_QUERIES = 8
 
 
 def clean_text(raw: Any) -> str:
@@ -168,13 +177,20 @@ class ScoutAgent(BaseAgent):
             max_crawl_delay_seconds=pol.max_crawl_delay_seconds,
             max_retries=pol.max_retries_on_429,
             contact_email=pol.contact_email,
+            robots_exempt_hosts=KEYED_API_HOSTS,
         )
 
-    def get_json(self, url: str) -> Any:
-        raw = self.get_bytes(url, accept="application/json")
+    def get_json(self, url: str, headers: dict[str, str] | None = None) -> Any:
+        raw = (
+            self.get_bytes(url, accept="application/json", headers=headers)
+            if headers
+            else self.get_bytes(url, accept="application/json")
+        )
         return json.loads(raw.decode("utf-8"))
 
-    def get_bytes(self, url: str, accept: str = "*/*") -> bytes:
+    def get_bytes(self, url: str, accept: str = "*/*", headers: dict[str, str] | None = None) -> bytes:
+        if headers:
+            return self.http.fetch_bytes(url, accept=accept, headers=headers)
         return self.http.fetch_bytes(url, accept=accept)
 
     # ------------------------------------------------------------------
@@ -358,12 +374,101 @@ class ScoutAgent(BaseAgent):
             if isinstance(j, dict) and "position" in j
         ]
 
+    # ------------------------------------------------------------------
+    # Keyword-search aggregators (role-agnostic: not limited to tech companies)
+    # ------------------------------------------------------------------
+
+    def search_queries(self) -> list[str]:
+        """Configured queries, else the target roles of the candidate's resumes (deduplicated)."""
+        targeting = self.config.targeting
+        raw = targeting.search_queries or [r for res in self.config.resumes for r in res.target_roles]
+        out: list[str] = []
+        for q in raw:
+            q = " ".join(str(q).split())
+            if q and q.lower() not in {x.lower() for x in out}:
+                out.append(q)
+        return out[:_MAX_SEARCH_QUERIES]
+
+    def fetch_adzuna(self) -> list[Opportunity]:
+        app_id, app_key = os.environ.get("ADZUNA_APP_ID", ""), os.environ.get("ADZUNA_APP_KEY", "")
+        if not (app_id and app_key):
+            raise ValueError("set ADZUNA_APP_ID and ADZUNA_APP_KEY (free keys from developer.adzuna.com)")
+        t = self.config.targeting
+        out: list[Opportunity] = []
+        for query in self.search_queries():
+            params = {
+                "app_id": app_id, "app_key": app_key, "results_per_page": "50",
+                "what": query, "content-type": "application/json",
+            }
+            if t.search_location:
+                params["where"] = t.search_location
+            country = urllib.parse.quote(t.search_country or "us", safe="")
+            data = self.get_json(
+                f"https://api.adzuna.com/v1/api/jobs/{country}/search/1?{urllib.parse.urlencode(params)}"
+            )
+            for j in data.get("results", []):
+                out.append(
+                    self._make_job(
+                        "adzuna", (j.get("company") or {}).get("display_name") or "", j.get("title"),
+                        (j.get("location") or {}).get("display_name"), j.get("redirect_url"),
+                        j.get("description"), j.get("id"), metadata={"query": query},
+                    )
+                )
+        return out
+
+    def fetch_usajobs(self) -> list[Opportunity]:
+        key = os.environ.get("USAJOBS_API_KEY", "")
+        email = self.config.politeness.contact_email
+        if not (key and email):
+            raise ValueError(
+                "set USAJOBS_API_KEY and politeness.contact_email (USAJOBS requires both; free key at developer.usajobs.gov)"
+            )
+        headers = {"Authorization-Key": key, "User-Agent": email}
+        out: list[Opportunity] = []
+        for query in self.search_queries():
+            params = {"Keyword": query, "ResultsPerPage": "50"}
+            if self.config.targeting.search_location:
+                params["LocationName"] = self.config.targeting.search_location
+            data = self.get_json(
+                f"https://data.usajobs.gov/api/search?{urllib.parse.urlencode(params)}", headers=headers
+            )
+            items = ((data.get("SearchResult") or {}).get("SearchResultItems")) or []
+            for item in items:
+                d = item.get("MatchedObjectDescriptor") or {}
+                details = (d.get("UserArea") or {}).get("Details") or {}
+                apply_uris = d.get("ApplyURI") or []
+                out.append(
+                    self._make_job(
+                        "usajobs", d.get("OrganizationName") or d.get("DepartmentName") or "",
+                        d.get("PositionTitle"), d.get("PositionLocationDisplay"),
+                        d.get("PositionURI") or (apply_uris[0] if apply_uris else ""),
+                        f"{details.get('JobSummary') or ''} {d.get('QualificationSummary') or ''}",
+                        d.get("PositionID") or item.get("MatchedObjectId"), metadata={"query": query},
+                    )
+                )
+        return out
+
+    def fetch_arbeitnow(self) -> list[Opportunity]:
+        data = self.get_json("https://www.arbeitnow.com/api/job-board-api")
+        return [
+            self._make_job(
+                "arbeitnow", j.get("company_name") or "", j.get("title"),
+                f"{j.get('location') or ''}{' remote' if j.get('remote') else ''}",
+                j.get("url"), j.get("description"), j.get("slug"),
+            )
+            for j in data.get("data", [])
+            if isinstance(j, dict)
+        ]
+
     def fetch_feed_jobs(self) -> list[Opportunity]:
         sources = self.config.targeting.sources
         jobs: list[Opportunity] = []
         for enabled, label, fn in (
             (sources.get("remotive", False), "remotive", self.fetch_remotive),
             (sources.get("remoteok", False), "remoteok", self.fetch_remoteok),
+            (sources.get("adzuna", False), "adzuna", self.fetch_adzuna),
+            (sources.get("usajobs", False), "usajobs", self.fetch_usajobs),
+            (sources.get("arbeitnow", False), "arbeitnow", self.fetch_arbeitnow),
         ):
             if not enabled:
                 continue
