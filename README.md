@@ -205,6 +205,7 @@ python3 job_scout.py curate                 # Agent 4: add matching feeds/sites/
 python3 job_scout.py targets --list
 python3 job_scout.py targets --find "Company Name"
 python3 job_scout.py targets --add "Company Name" greenhouse slug
+python3 job_scout.py targets --add-companies list.txt   # names from any pasted list ("-" reads stdin)
 
 # Review queue and apply interactively (Agent 3)
 python3 job_scout.py queue --limit 20
