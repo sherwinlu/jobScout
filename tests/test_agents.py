@@ -941,6 +941,35 @@ class JobScoutAgentsTest(unittest.TestCase):
             jobs = scout.fetch_ashby("nevis", "Nevis")
         self.assertIn("Platform", jobs[0].text)
 
+    def test_parse_company_names_handles_pasted_lists(self) -> None:
+        from jobscout.ats_discovery import parse_company_names
+
+        text = """FEMTECH COMPANIES (HIRING LIST)
+Here are 16 femtech companies that are actively hiring right now, ranked by growth:
+Midi Health - virtual menopause and midlife care (San Francisco)
+1. LangChain (San Francisco): platform to build agents. $300m series c [103 roles]
+- Natural Cycles\u00b0 - FDA-cleared birth control app (Stockholm)
+Midi Health - duplicate
+#femtech #healthtech #hiring
+\U0001F514 follow me for a new list every week: Grace Gong
+Career page links are in the comments
+"""
+        self.assertEqual(parse_company_names(text), ["Midi Health", "LangChain", "Natural Cycles\u00b0"])
+        self.assertEqual(
+            parse_company_names("1Password - passwords\n23andMe (CA)\n8VC: fund\n2) Acme\n* Beta Corp"),
+            ["1Password", "23andMe", "8VC", "Acme", "Beta Corp"],
+        )
+
+    def test_add_companies_reports_unreadable_file(self) -> None:
+        from types import SimpleNamespace
+
+        from jobscout.cli import cmd_add_companies
+
+        orch = SimpleNamespace(storage=self.storage, scout=None)
+        with patch("builtins.print") as printed:
+            self.assertEqual(cmd_add_companies(orch, str(self.home / "missing.txt")), 1)
+        self.assertIn("Could not read", printed.call_args[0][0])
+
     def test_custom_cover_letter_only_generated_when_required(self) -> None:
         # 1. Detection helpers distinguish required vs optional vs unmentioned
         self.assertFalse(is_cover_letter_required_in_text("Build distributed cloud systems."))

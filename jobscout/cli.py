@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
 from jobscout.agents.scout import norm
-from jobscout.config import MAX_NEW_RESOLUTIONS_PER_RUN, get_template_text, load_config
+from jobscout.ats_discovery import parse_company_names
+from jobscout.config import MAX_NEW_RESOLUTIONS_PER_RUN, get_template_text, load_config, now_iso
 from jobscout.llm import LocalLLMError
 from jobscout.models import RankedOpportunity
 from jobscout.orchestrator import JobScoutOrchestrator
@@ -86,6 +88,44 @@ def cmd_find(orch: JobScoutOrchestrator, name: str) -> int:
             "jobs.ashbyhq.com/<slug>), then use `targets --add`."
         )
     return 0
+
+
+def cmd_add_companies(orch: JobScoutOrchestrator, source: str) -> int:
+    """Resolve company names from a pasted list (file path, or '-' for stdin) to job boards."""
+    try:
+        text = sys.stdin.read() if source == "-" else Path(source).expanduser().read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"Could not read {source}: {exc}")
+        return 1
+    state = orch.storage.load_targets_state()
+    known = {norm(n) for n in state["resolved"]} | {norm(n) for n in state["ignored"]}
+    names = [n for n in parse_company_names(text) if norm(n) not in known]
+    if not names:
+        print("No new company names found.")
+        return 0
+    print(f"Looking up job boards for {len(names)} companies...")
+    today = datetime.now().strftime("%Y-%m-%d")
+    now = now_iso()
+    found = 0
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for name, hit in zip(names, pool.map(lambda n: _safe_resolve(orch, n), names)):
+            if hit:
+                state["resolved"][name] = {**hit, "source": "list", "added": today}
+                state["unresolved"].pop(name, None)
+                found += 1
+                print(f"  + {name:<32} {hit['ats']}/{hit['slug']}")
+            else:
+                state["unresolved"][name] = now
+    orch.storage.save_targets_state(state)
+    print(f"Added {found} of {len(names)}; the rest have no public Greenhouse/Ashby/Lever board.")
+    return 0
+
+
+def _safe_resolve(orch: JobScoutOrchestrator, name: str) -> dict[str, str] | None:
+    try:
+        return orch.scout.resolve_company(name)
+    except Exception:
+        return None
 
 
 def cmd_add(orch: JobScoutOrchestrator, name: str, ats: str, slug: str) -> int:
@@ -259,6 +299,11 @@ def build_parser() -> argparse.ArgumentParser:
     targets_p = sub.add_parser("targets", help="Inspect or manage watched company boards")
     targets_p.add_argument("--list", action="store_true", help="list watched companies")
     targets_p.add_argument("--find", metavar="COMPANY", help="discover a company's ATS board")
+    targets_p.add_argument(
+        "--add-companies", metavar="FILE",
+        help="resolve company names from a pasted list (file path, or - for stdin) and watch their boards; "
+        "not limited by max_new_resolutions",
+    )
     targets_p.add_argument("--add", nargs=3, metavar=("NAME", "ATS", "SLUG"), help="add board manually")
 
     sub.add_parser("status", help="Show agent, LLM, Playwright, and DB status")
@@ -297,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "targets":
         if args.find:
             return cmd_find(orch, args.find)
+        if args.add_companies:
+            return cmd_add_companies(orch, args.add_companies)
         if args.add:
             return cmd_add(orch, *args.add)
         return cmd_list_targets(orch)
