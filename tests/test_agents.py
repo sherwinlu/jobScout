@@ -1017,6 +1017,28 @@ Career page links are in the comments
         self.assertNotIn("intern", ids)     # title_exclude stays a hard gate
         self.assertNotIn("untitled", ids)   # a posting without a title is never a candidate
 
+    def test_alignment_orders_candidates_but_not_their_heuristic_points(self) -> None:
+        ranker, opps = self._alignment_ranker("boost")
+        alone = {o.id: pts for o, pts, _ in ranker.prefilter([o for o in opps if o.id.endswith("unrelated")])}
+        pooled = {o.id: pts for o, pts, _ in ranker.prefilter(opps)}
+        unrelated = "greenhouse:Co:unrelated"
+        self.assertEqual(alone[unrelated], pooled[unrelated])  # pool-independent, so final_score is stable
+
+    def test_news_leads_are_not_starved_by_alignment_ordering(self) -> None:
+        ranker, opps = self._alignment_ranker("boost")
+        lead = Opportunity(id="news:Co:x", source="news", company="Co", title="CTO at Co", location="",
+                           url="https://example.com/a", text="Co raised funding", kind="news_lead")
+        ids = [o.id for o, _, _ in ranker.prefilter(opps + [lead])]
+        self.assertLess(ids.index(lead.id), ids.index("greenhouse:Co:unrelated"))
+
+    def test_title_matches_still_combines_target_terms_and_exclusions(self) -> None:
+        ranker, _ = self._alignment_ranker("boost")
+        cfg = ranker.config
+        self.assertTrue(cfg.title_matches("VP of Engineering"))
+        self.assertFalse(cfg.title_matches("Engineering Manager"))
+        self.assertFalse(cfg.title_matches("VP Intern Program"))
+        self.assertFalse(cfg.title_matches(""))
+
     def test_prefilter_require_mode_keeps_the_title_gate(self) -> None:
         ranker, opps = self._alignment_ranker("require")
         ids = {o.id.split(":")[-1] for o, _, _ in ranker.prefilter(opps)}

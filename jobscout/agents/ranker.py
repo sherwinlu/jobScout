@@ -62,16 +62,17 @@ class RankerAgent(BaseAgent):
 
     name = "ranker"
 
-    # Points a posting can earn for description/resume alignment, and for a title that has the
-    # target terms. heuristic_to_100 maps 1 point to 4 of 100.
-    ALIGNMENT_POINTS = 10
+    # Description/resume alignment only orders candidates for the LLM budget (it is a percentile of
+    # the current pool, so it must not feed final_score). A title with the target terms earns a
+    # stable bonus; heuristic_to_100 maps 1 point to 4 of 100.
+    ALIGNMENT_SORT_POINTS = 10
+    NEUTRAL_ALIGNMENT = 0.5  # news leads have no description to compare
     TITLE_BONUS_POINTS = 4
 
     def compute_heuristic(
         self,
         opp: Opportunity,
         company_domain_hits: int = 0,
-        alignment: float = 0.0,
         title_match: bool = False,
     ) -> tuple[int, list[str]]:
         title = opp.title.lower()
@@ -87,7 +88,6 @@ class RankerAgent(BaseAgent):
             pts += 2
         if opp.kind == "news_lead":
             pts += 2
-        pts += round(self.ALIGNMENT_POINTS * alignment)
         if title_match:
             pts += self.TITLE_BONUS_POINTS
         return pts, matched
@@ -121,16 +121,15 @@ class RankerAgent(BaseAgent):
         alignment = resume_alignment({o.id: f"{o.title} {o.text}" for o in pool if o.kind == "job"}, resumes)
 
         candidates: list[tuple[Opportunity, int, list[str]]] = []
+        order: dict[str, float] = {}
         for opp in pool:
             pts, matched = self.compute_heuristic(
-                opp,
-                domain_hits.get(opp.company, 0),
-                alignment.get(opp.id, 0.0),
-                title_ok.get(opp.id, False),
+                opp, domain_hits.get(opp.company, 0), title_ok.get(opp.id, False)
             )
             candidates.append((opp, pts, matched))
+            order[opp.id] = pts + self.ALIGNMENT_SORT_POINTS * alignment.get(opp.id, self.NEUTRAL_ALIGNMENT)
 
-        candidates.sort(key=lambda item: item[1], reverse=True)
+        candidates.sort(key=lambda item: order[item[0].id], reverse=True)
         return candidates
 
     def evaluate_with_llm(
