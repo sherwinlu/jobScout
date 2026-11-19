@@ -1178,6 +1178,19 @@ Career page links are in the comments
         self.assertEqual((d.search_queries, d.search_country, d.search_location), ([], "us", ""))
         self.assertFalse(any(d.sources[k] for k in ("adzuna", "usajobs", "arbeitnow")))
 
+    def test_feed_discovery_ignores_oembed_links(self) -> None:
+        from jobscout.agents.curator import discover_feeds_from_html
+
+        html = (
+            b'<html><head><title>Site</title>'
+            b'<link rel="alternate" type="application/json+oembed" href="https://s.example/oembed.json">'
+            b'<link rel="alternate" type="text/xml+oembed" href="https://s.example/oembed.xml">'
+            b'<link rel="alternate" type="application/rss+xml" title="Posts" href="https://s.example/feed/">'
+            b'</head></html>'
+        )
+        urls = [f["url"] for f in discover_feeds_from_html("https://s.example/", html)]
+        self.assertEqual(urls, ["https://s.example/feed/"])
+
     def test_custom_cover_letter_only_generated_when_required(self) -> None:
         # 1. Detection helpers distinguish required vs optional vs unmentioned
         self.assertFalse(is_cover_letter_required_in_text("Build distributed cloud systems."))

@@ -238,7 +238,8 @@ class _FeedLinkParser(HTMLParser):
         rel = attr_map.get("rel", "").lower()
         ftype = attr_map.get("type", "").lower()
         href = attr_map.get("href", "").strip()
-        if "alternate" in rel and href and any(
+        # oEmbed discovery links (type="text/xml+oembed") contain "text/xml" but are not feeds.
+        if "alternate" in rel and href and "oembed" not in ftype and any(
             tok in ftype for tok in ("rss+xml", "atom+xml", "feed+json", "application/xml", "text/xml")
         ):
             self.links.append({"url": href, "title": attr_map.get("title", "").strip(), "type": ftype})
