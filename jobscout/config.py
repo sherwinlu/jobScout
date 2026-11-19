@@ -150,17 +150,29 @@ class TargetingConfig:
             "remoteok": False,
             "hn_who_is_hiring": True,
             "news_feeds": False,
+            "adzuna": False,
+            "usajobs": False,
+            "arbeitnow": False,
         }
     )
+    # Keyword search for the aggregator sources (adzuna, usajobs, arbeitnow). Empty `queries`
+    # falls back to the target_roles of your resumes.
+    search_queries: list[str] = field(default_factory=list)
+    search_country: str = "us"
+    search_location: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TargetingConfig":
         flt = data.get("filters") or {}
+        search = data.get("job_search") or {}
         sources = {
             "remotive": False,
             "remoteok": False,
             "hn_who_is_hiring": True,
             "news_feeds": False,
+            "adzuna": False,
+            "usajobs": False,
+            "arbeitnow": False,
         }
         sources.update({str(k): bool(v) for k, v in (data.get("sources") or {}).items()})
 
@@ -193,6 +205,9 @@ class TargetingConfig:
             news_feeds=list(data.get("news_feeds") or []),
             fetch_article_body=bool(data.get("fetch_article_body", False)),
             sources=sources,
+            search_queries=[str(q).strip() for q in (search.get("queries") or []) if str(q).strip()],
+            search_country=str(search.get("country") or "us").strip().lower(),
+            search_location=str(search.get("location") or "").strip(),
         )
 
 
