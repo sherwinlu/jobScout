@@ -258,7 +258,7 @@ class ScoutAgent(BaseAgent):
             loc = j.get("locationName") or ""
             if (j.get("workplaceType") or "").lower() == "remote":
                 loc += " remote"
-            title = j.get("title")
+            title = j.get("title") or ""
             team = teams.get(j.get("teamId"), "")
             out.append(
                 self._make_job(
