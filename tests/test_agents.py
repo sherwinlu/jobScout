@@ -1115,7 +1115,7 @@ Career page links are in the comments
 
     def test_aggregator_sources_parse_results_and_require_keys(self) -> None:
         cfg = self._unknown_ats_config("aggregators")
-        cfg.targeting.search_queries = ["support engineer"]
+        cfg.targeting.search_queries = ["support engineer", "customer support engineer"]
         cfg.politeness.contact_email = "me@example.com"
         scout = ScoutAgent(cfg, Storage(cfg), OfflineLLM())
         requested: list[tuple[str, dict | None]] = []
@@ -1158,12 +1158,25 @@ Career page links are in the comments
                 adz, usa = scout.fetch_adzuna(), scout.fetch_usajobs()
             arb = scout.fetch_arbeitnow()
 
+        self.assertEqual(len(adz), 1)
         self.assertEqual((adz[0].id, adz[0].company, adz[0].location), ("adzuna:Acme:9", "Acme", "Austin, TX"))
         self.assertEqual(adz[0].metadata["attribution"], "Jobs by Adzuna (https://www.adzuna.com)")
         self.assertIn("what=support+engineer", requested[0][0])
         self.assertEqual((usa[0].company, usa[0].url), ("NASA", "https://www.usajobs.gov/job/55"))
-        self.assertEqual(requested[1][1], {"Authorization-Key": "uk", "User-Agent": "me@example.com"})
+        usajobs_calls = [h for u, h in requested if "usajobs" in u]
+        self.assertEqual(usajobs_calls[0], {"Authorization-Key": "uk", "User-Agent": "me@example.com"})
+        self.assertTrue(all("app_key" not in u for u, _ in requested if "usajobs" in u))
         self.assertEqual((arb[0].company, arb[0].location), ("Firma", "Berlin remote"))
+        self.assertEqual(len(usa), 1)  # two queries returned the same posting; it is kept once
+
+    def test_job_search_config_is_parsed(self) -> None:
+        t = TargetingConfig.from_dict(
+            {"job_search": {"queries": ["TPM", " ", "support engineer"], "country": "GB", "location": " London "}}
+        )
+        self.assertEqual((t.search_queries, t.search_country, t.search_location), (["TPM", "support engineer"], "gb", "London"))
+        d = TargetingConfig.from_dict({})
+        self.assertEqual((d.search_queries, d.search_country, d.search_location), ([], "us", ""))
+        self.assertFalse(any(d.sources[k] for k in ("adzuna", "usajobs", "arbeitnow")))
 
     def test_custom_cover_letter_only_generated_when_required(self) -> None:
         # 1. Detection helpers distinguish required vs optional vs unmentioned

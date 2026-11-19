@@ -398,7 +398,7 @@ class ScoutAgent(BaseAgent):
         if not (app_id and app_key):
             raise SourceNotConfigured("no ADZUNA_APP_ID / ADZUNA_APP_KEY set; free keys at developer.adzuna.com")
         t = self.config.targeting
-        out: list[Opportunity] = []
+        out: dict[str, Opportunity] = {}  # several queries can return the same posting
         for query in self.search_queries():
             params = {
                 "app_id": app_id, "app_key": app_key, "results_per_page": "50",
@@ -411,14 +411,13 @@ class ScoutAgent(BaseAgent):
                 f"https://api.adzuna.com/v1/api/jobs/{country}/search/1?{urllib.parse.urlencode(params)}"
             )
             for j in data.get("results", []):
-                out.append(
-                    self._make_job(
-                        "adzuna", (j.get("company") or {}).get("display_name") or "", j.get("title"),
-                        (j.get("location") or {}).get("display_name"), j.get("redirect_url"),
-                        j.get("description"), j.get("id"), metadata={"query": query},
-                    )
+                opp = self._make_job(
+                    "adzuna", (j.get("company") or {}).get("display_name") or "", j.get("title"),
+                    (j.get("location") or {}).get("display_name"), j.get("redirect_url"),
+                    j.get("description"), j.get("id"), metadata={"query": query},
                 )
-        return out
+                out.setdefault(opp.id, opp)
+        return list(out.values())
 
     def fetch_usajobs(self) -> list[Opportunity]:
         key = os.environ.get("USAJOBS_API_KEY", "")
@@ -428,7 +427,7 @@ class ScoutAgent(BaseAgent):
                 "no USAJOBS_API_KEY / politeness.contact_email set; USAJOBS needs both, free key at developer.usajobs.gov"
             )
         headers = {"Authorization-Key": key, "User-Agent": email}
-        out: list[Opportunity] = []
+        out: dict[str, Opportunity] = {}
         for query in self.search_queries():
             params = {"Keyword": query, "ResultsPerPage": "50"}
             if self.config.targeting.search_location:
@@ -441,16 +440,15 @@ class ScoutAgent(BaseAgent):
                 d = item.get("MatchedObjectDescriptor") or {}
                 details = (d.get("UserArea") or {}).get("Details") or {}
                 apply_uris = d.get("ApplyURI") or []
-                out.append(
-                    self._make_job(
-                        "usajobs", d.get("OrganizationName") or d.get("DepartmentName") or "",
-                        d.get("PositionTitle"), d.get("PositionLocationDisplay"),
-                        d.get("PositionURI") or (apply_uris[0] if apply_uris else ""),
-                        f"{details.get('JobSummary') or ''} {d.get('QualificationSummary') or ''}",
-                        d.get("PositionID") or item.get("MatchedObjectId"), metadata={"query": query},
-                    )
+                opp = self._make_job(
+                    "usajobs", d.get("OrganizationName") or d.get("DepartmentName") or "",
+                    d.get("PositionTitle"), d.get("PositionLocationDisplay"),
+                    d.get("PositionURI") or (apply_uris[0] if apply_uris else ""),
+                    f"{details.get('JobSummary') or ''} {d.get('QualificationSummary') or ''}",
+                    d.get("PositionID") or item.get("MatchedObjectId"), metadata={"query": query},
                 )
-        return out
+                out.setdefault(opp.id, opp)
+        return list(out.values())
 
     def fetch_arbeitnow(self) -> list[Opportunity]:
         data = self.get_json("https://www.arbeitnow.com/api/job-board-api")
