@@ -955,6 +955,20 @@ Midi Health - duplicate
 Career page links are in the comments
 """
         self.assertEqual(parse_company_names(text), ["Midi Health", "LangChain", "Natural Cycles\u00b0"])
+        self.assertEqual(
+            parse_company_names("1Password - passwords\n23andMe (CA)\n8VC: fund\n2) Acme\n* Beta Corp"),
+            ["1Password", "23andMe", "8VC", "Acme", "Beta Corp"],
+        )
+
+    def test_add_companies_reports_unreadable_file(self) -> None:
+        from types import SimpleNamespace
+
+        from jobscout.cli import cmd_add_companies
+
+        orch = SimpleNamespace(storage=self.storage, scout=None)
+        with patch("builtins.print") as printed:
+            self.assertEqual(cmd_add_companies(orch, str(self.home / "missing.txt")), 1)
+        self.assertIn("Could not read", printed.call_args[0][0])
 
     def test_custom_cover_letter_only_generated_when_required(self) -> None:
         # 1. Detection helpers distinguish required vs optional vs unmentioned

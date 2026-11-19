@@ -213,7 +213,8 @@ def parse_search_results(data: Any, limit: int = 5) -> list[dict[str, str]]:
     return out
 
 
-_LIST_PREFIX_RE = re.compile(r"^[\s\-–—*•\d.)\]]+")
+# List markers only: "1. Acme", "2) Acme", "- Acme". A bare leading digit is part of the name (1Password).
+_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-–—*•]+\s+|\d+[.)]\s+)")
 _LIST_SPLIT_RE = re.compile(r"\s+[-–—]\s+|:|\s*[(\[]")
 
 

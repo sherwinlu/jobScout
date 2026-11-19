@@ -92,7 +92,11 @@ def cmd_find(orch: JobScoutOrchestrator, name: str) -> int:
 
 def cmd_add_companies(orch: JobScoutOrchestrator, source: str) -> int:
     """Resolve company names from a pasted list (file path, or '-' for stdin) to job boards."""
-    text = sys.stdin.read() if source == "-" else Path(source).expanduser().read_text(encoding="utf-8")
+    try:
+        text = sys.stdin.read() if source == "-" else Path(source).expanduser().read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"Could not read {source}: {exc}")
+        return 1
     state = orch.storage.load_targets_state()
     known = {norm(n) for n in state["resolved"]} | {norm(n) for n in state["ignored"]}
     names = [n for n in parse_company_names(text) if norm(n) not in known]
@@ -297,7 +301,8 @@ def build_parser() -> argparse.ArgumentParser:
     targets_p.add_argument("--find", metavar="COMPANY", help="discover a company's ATS board")
     targets_p.add_argument(
         "--add-companies", metavar="FILE",
-        help="resolve company names from a pasted list (file path, or - for stdin) and watch their boards",
+        help="resolve company names from a pasted list (file path, or - for stdin) and watch their boards; "
+        "not limited by max_new_resolutions",
     )
     targets_p.add_argument("--add", nargs=3, metavar=("NAME", "ATS", "SLUG"), help="add board manually")
 
