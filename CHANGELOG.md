@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 First public pre-release (alpha). The internal `2.0.0` numbering was reset because the project has not yet been validated against live application forms; expect breaking changes before 1.0.
 
 ### Added
+- Ranking now weighs how well a posting's description aligns with the candidate's resumes (`jobscout/similarity.py`, TF-IDF cosine within the candidate pool). `targeting.filters.title_filter` (`boost` by default, `require` for the previous hard title gate) controls whether `title_must_match_all` is a requirement or a bonus; `title_exclude`, location, and untitled postings remain hard filters.
 - `targets --add-companies FILE` extracts company names from pasted list text (newsletters, VC hiring lists, spreadsheets) and watches the Greenhouse/Ashby/Lever boards it can resolve.
 - Ashby boards whose posting API robots.txt is unavailable (HTTP 401) are now read from the public `jobs.ashbyhq.com/<slug>` page, which robots.txt allows, instead of being skipped. Postings from that path carry title, location and workplace type but no description text.
 - Multi-agent architecture with `ScoutAgent`, `RankerAgent`, `ApplierAgent`, and `JobScoutOrchestrator`.

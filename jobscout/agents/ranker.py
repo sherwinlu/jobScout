@@ -11,6 +11,7 @@ from jobscout.config import now_iso
 from jobscout.llm import LocalLLMClient
 from jobscout.models import Opportunity, RankedOpportunity
 from jobscout.resume_tailor import tailor_resume_for_opportunity
+from jobscout.similarity import resume_alignment
 from jobscout.security import (
     redact_pii_for_llm,
     sanitize_untrusted_text,
@@ -61,8 +62,17 @@ class RankerAgent(BaseAgent):
 
     name = "ranker"
 
+    # Points a posting can earn for description/resume alignment, and for a title that has the
+    # target terms. heuristic_to_100 maps 1 point to 4 of 100.
+    ALIGNMENT_POINTS = 10
+    TITLE_BONUS_POINTS = 4
+
     def compute_heuristic(
-        self, opp: Opportunity, company_domain_hits: int = 0
+        self,
+        opp: Opportunity,
+        company_domain_hits: int = 0,
+        alignment: float = 0.0,
+        title_match: bool = False,
     ) -> tuple[int, list[str]]:
         title = opp.title.lower()
         blob = f"{title} {opp.text.lower()}"
@@ -77,6 +87,9 @@ class RankerAgent(BaseAgent):
             pts += 2
         if opp.kind == "news_lead":
             pts += 2
+        pts += round(self.ALIGNMENT_POINTS * alignment)
+        if title_match:
+            pts += self.TITLE_BONUS_POINTS
         return pts, matched
 
     def prefilter(
@@ -87,14 +100,34 @@ class RankerAgent(BaseAgent):
             if self.config.domain_matches(f"{opp.title} {opp.text}"):
                 domain_hits[opp.company] = domain_hits.get(opp.company, 0) + 1
 
-        candidates: list[tuple[Opportunity, int, list[str]]] = []
+        require_title = self.config.targeting.title_filter == "require"
+        pool: list[Opportunity] = []
+        title_ok: dict[str, bool] = {}
         for opp in opportunities:
             if not opp.url:
                 continue
             if opp.kind == "job":
-                if not self.config.title_matches(opp.title) or not self.config.location_matches(opp.location):
+                if not (opp.title or "").strip():
                     continue
-            pts, matched = self.compute_heuristic(opp, domain_hits.get(opp.company, 0))
+                if not self.config.location_matches(opp.location) or self.config.title_excluded(opp.title):
+                    continue
+                title_ok[opp.id] = self.config.title_has_target_terms(opp.title)
+                if require_title and not title_ok[opp.id]:
+                    continue
+            pool.append(opp)
+
+        # Rank by how well the description reads like the candidate's resume, not just the title.
+        resumes = [r.text for r in self.config.resumes] or [self.config.get_resume().text]
+        alignment = resume_alignment({o.id: f"{o.title} {o.text}" for o in pool if o.kind == "job"}, resumes)
+
+        candidates: list[tuple[Opportunity, int, list[str]]] = []
+        for opp in pool:
+            pts, matched = self.compute_heuristic(
+                opp,
+                domain_hits.get(opp.company, 0),
+                alignment.get(opp.id, 0.0),
+                title_ok.get(opp.id, False),
+            )
             candidates.append((opp, pts, matched))
 
         candidates.sort(key=lambda item: item[1], reverse=True)

@@ -113,6 +113,15 @@ class CandidateConfig:
         )
 
 
+def _parse_title_filter(raw: Any) -> str:
+    if raw is None:
+        return "boost"
+    mode = str(raw).strip().lower()
+    if mode not in {"boost", "require"}:
+        raise ValueError(f"targeting.filters.title_filter must be 'boost' or 'require', got {raw!r}")
+    return mode
+
+
 @dataclass
 class TargetingConfig:
     role_summary: str = ""
@@ -120,6 +129,9 @@ class TargetingConfig:
     dealbreakers: list[str] = field(default_factory=list)
     title_must_match_all: list[str] = field(default_factory=list)
     title_exclude: list[str] = field(default_factory=list)
+    # "boost": a title matching title_must_match_all only earns bonus points and postings are
+    # ranked by how well their description aligns with the resume. "require": the old hard gate.
+    title_filter: str = "boost"
     allowed_locations: list[str] = field(default_factory=list)
     allow_non_us: bool = False
     domain_keywords: list[str] = field(default_factory=list)
@@ -163,6 +175,7 @@ class TargetingConfig:
             dealbreakers=[str(d) for d in (data.get("dealbreakers") or [])],
             title_must_match_all=[str(p) for p in (flt.get("title_must_match_all") or [])],
             title_exclude=[str(p) for p in (flt.get("title_exclude") or [])],
+            title_filter=_parse_title_filter(flt.get("title_filter")),
             allowed_locations=[str(p) for p in (flt.get("allowed_locations") or [])],
             allow_non_us=bool(flt.get("allow_non_us", False)),
             domain_keywords=[str(p) for p in (data.get("domain_keywords") or flt.get("domain_keywords") or [])],
@@ -450,19 +463,20 @@ class ScoutConfig:
     def select_cover_letter_for(self, title: str, text: str = "") -> ResumeProfile | None:
         """Pick the best-matching sample cover letter for an opportunity, if any are configured."""
         return self._select_best_profile(self.cover_letters, title, text)
-    def title_matches(self, title: str) -> bool:
+    def title_excluded(self, title: str) -> bool:
+        t = (title or "").strip()
+        return bool(t) and any(re.search(pat, t, re.I) for pat in self.targeting.title_exclude)
+
+    def title_has_target_terms(self, title: str) -> bool:
         t = (title or "").strip()
         if not t:
             return False
-        if self.targeting.title_must_match_all and not all(
+        return not self.targeting.title_must_match_all or all(
             re.search(pat, t, re.I) for pat in self.targeting.title_must_match_all
-        ):
-            return False
-        if self.targeting.title_exclude and any(
-            re.search(pat, t, re.I) for pat in self.targeting.title_exclude
-        ):
-            return False
-        return True
+        )
+
+    def title_matches(self, title: str) -> bool:
+        return self.title_has_target_terms(title) and not self.title_excluded(title) and bool((title or "").strip())
 
     def location_matches(self, location: str) -> bool:
         loc = (location or "").lower().strip()

@@ -82,6 +82,7 @@
         "anywhere",
         "united states"
       ],
+      "title_filter": "boost",
       "allow_non_us": false
     },
     "keyword_weights": {

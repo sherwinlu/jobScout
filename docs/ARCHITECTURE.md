@@ -175,7 +175,7 @@ sequenceDiagram
     Scout->>DB: save_opportunities() + save_targets_state()
 
     CLI->>Ranker: run(opportunities)
-    Ranker->>Ranker: prefilter (title/location/keywords)
+    Ranker->>Ranker: prefilter (location/exclusions, resume-alignment score, keywords)
     Ranker->>LLM: evaluate_with_llm (PII-redacted resume + untrusted tags)
     opt verdict in auto_tailor_verdicts
         Ranker->>LLM: tailor_resume_for_opportunity()

@@ -970,6 +970,64 @@ Career page links are in the comments
             self.assertEqual(cmd_add_companies(orch, str(self.home / "missing.txt")), 1)
         self.assertIn("Could not read", printed.call_args[0][0])
 
+    def test_resume_alignment_prefers_postings_that_read_like_the_resume(self) -> None:
+        from jobscout.similarity import resume_alignment
+
+        resume = "Staff engineer building FHIR interoperability, HIPAA compliant clinical data pipelines in Python on AWS"
+        docs = {
+            "match": "Build HIPAA compliant clinical data pipelines in Python and FHIR on AWS",
+            "partial": "Python services on AWS for an ecommerce checkout",
+            "other": "Retail store manager overseeing seasonal merchandising and staffing",
+        }
+        scores = resume_alignment(docs, [resume])
+        self.assertGreater(scores["match"], scores["partial"])
+        self.assertGreater(scores["partial"], scores["other"])
+        self.assertEqual(resume_alignment(docs, []), {k: 0.0 for k in docs})
+        self.assertEqual(resume_alignment({}, [resume]), {})
+
+    def _alignment_ranker(self, title_filter: str) -> tuple[RankerAgent, list[Opportunity]]:
+        cfg = self._unknown_ats_config(f"align_{title_filter}")
+        cfg.targeting.title_must_match_all = [r"\b(vp|head|director)\b"]
+        cfg.targeting.title_exclude = [r"\bintern\b"]
+        cfg.targeting.allowed_locations = ["remote"]
+        cfg.targeting.title_filter = title_filter
+        cfg.resumes = [ResumeProfile(
+            id="r", label="R", file_path="",
+            text="Led platform engineering: Kubernetes, Terraform, Python, distributed systems, observability",
+        )]
+        def job(i: str, title: str, text: str) -> Opportunity:
+            return Opportunity(id=f"greenhouse:Co:{i}", source="greenhouse", company="Co", title=title,
+                               location="Remote", url=f"https://boards.greenhouse.io/co/jobs/{i}", text=text)
+        opps = [
+            job("aligned", "Engineering Manager, Platform",
+                "Own Kubernetes and Terraform platform, Python tooling, distributed systems, observability"),
+            job("unrelated", "Engineering Manager, Retail",
+                "Coordinate store merchandising schedules and seasonal staffing for shops"),
+            job("titled", "VP of Sales Operations", "Run quota planning and territory design"),
+            job("intern", "Platform Intern", "Kubernetes Terraform Python distributed systems observability"),
+            job("untitled", "", "Kubernetes Terraform Python"),
+        ]
+        return RankerAgent(cfg, Storage(cfg), FakeLLM()), opps
+
+    def test_prefilter_boost_mode_ranks_by_description_alignment_not_title(self) -> None:
+        ranker, opps = self._alignment_ranker("boost")
+        ids = [o.id.split(":")[-1] for o, _, _ in ranker.prefilter(opps)]
+        # No title gate: the aligned manager role qualifies and outranks the unrelated one.
+        self.assertLess(ids.index("aligned"), ids.index("unrelated"))
+        self.assertNotIn("intern", ids)     # title_exclude stays a hard gate
+        self.assertNotIn("untitled", ids)   # a posting without a title is never a candidate
+
+    def test_prefilter_require_mode_keeps_the_title_gate(self) -> None:
+        ranker, opps = self._alignment_ranker("require")
+        ids = {o.id.split(":")[-1] for o, _, _ in ranker.prefilter(opps)}
+        self.assertEqual(ids, {"titled"})
+
+    def test_title_filter_must_be_boost_or_require(self) -> None:
+        self.assertEqual(TargetingConfig.from_dict({}).title_filter, "boost")
+        self.assertEqual(TargetingConfig.from_dict({"filters": {"title_filter": "Require"}}).title_filter, "require")
+        with self.assertRaises(ValueError):
+            TargetingConfig.from_dict({"filters": {"title_filter": "strict"}})
+
     def test_custom_cover_letter_only_generated_when_required(self) -> None:
         # 1. Detection helpers distinguish required vs optional vs unmentioned
         self.assertFalse(is_cover_letter_required_in_text("Build distributed cloud systems."))
