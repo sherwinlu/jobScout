@@ -211,3 +211,35 @@ def parse_search_results(data: Any, limit: int = 5) -> list[dict[str, str]]:
         if len(out) >= limit:
             break
     return out
+
+
+_LIST_PREFIX_RE = re.compile(r"^[\s\-–—*•\d.)\]]+")
+_LIST_SPLIT_RE = re.compile(r"\s+[-–—]\s+|:|\s*[(\[]")
+
+
+def parse_company_names(text: str, max_words: int = 6, max_chars: int = 40) -> list[str]:
+    """Pull company names out of pasted list text such as ``1. Acme (City) - what it does``.
+
+    The name is the text before the first ' - ', ':' or '(' on each line. Headers, hashtags and
+    sentences are skipped by shape (all-caps, too many words, no letters), so the result is
+    best-effort; callers resolve each name against real boards and drop the rest.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for line in (text or "").splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        line = _LIST_PREFIX_RE.sub("", line.strip())
+        line = re.sub(r"^[^\w]+", "", line)
+        if not line:
+            continue
+        name = _LIST_SPLIT_RE.split(line, maxsplit=1)[0].strip(" .,;")
+        if not re.search(r"[A-Za-z]", name) or len(name) > max_chars or len(name.split()) > max_words:
+            continue
+        if name.isupper() and len(name.split()) > 1:
+            continue
+        key = _norm(name)
+        if key and key not in seen:
+            seen.add(key)
+            names.append(name)
+    return names
