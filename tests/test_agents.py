@@ -26,7 +26,7 @@ from jobscout.agents.applier import (
 from jobscout.agents.curator import CurationReport, CuratorAgent
 from jobscout.ats_discovery import cluster_unknown_job_hosts, parse_search_results
 from jobscout.agents.ranker import RankerAgent
-from jobscout.agents.scout import ScoutAgent, extract_article_text, parse_feed_xml
+from jobscout.agents.scout import ScoutAgent, SourceNotConfigured, extract_article_text, parse_feed_xml
 from jobscout.config import (
     CandidateConfig,
     CurationConfig,
@@ -1139,10 +1139,21 @@ Career page links are in the comments
             with patch.dict("os.environ", {}, clear=False):
                 for var in ("ADZUNA_APP_ID", "ADZUNA_APP_KEY", "USAJOBS_API_KEY"):
                     os.environ.pop(var, None)
-                with self.assertRaises(ValueError):
+                with self.assertRaises(SourceNotConfigured):
                     scout.fetch_adzuna()
-                with self.assertRaises(ValueError):
+                with self.assertRaises(SourceNotConfigured):
                     scout.fetch_usajobs()
+                # Enabled without keys: skipped with a log line, and no request is ever made.
+                cfg.targeting.sources.update({"adzuna": True, "usajobs": True})
+                requested.clear()
+                with patch("jobscout.agents.scout.log") as logged:
+                    self.assertEqual(scout.fetch_feed_jobs(), [])
+                self.assertEqual(requested, [])
+                messages = [c.args[0] for c in logged.call_args_list]
+                self.assertTrue(any(m.startswith("scout/adzuna: skipped") for m in messages))
+                self.assertTrue(any(m.startswith("scout/usajobs: skipped") for m in messages))
+                self.assertFalse(any("failed" in m for m in messages))
+                cfg.targeting.sources.update({"adzuna": False, "usajobs": False})
             with patch.dict("os.environ", {"ADZUNA_APP_ID": "id", "ADZUNA_APP_KEY": "key", "USAJOBS_API_KEY": "uk"}):
                 adz, usa = scout.fetch_adzuna(), scout.fetch_usajobs()
             arb = scout.fetch_arbeitnow()

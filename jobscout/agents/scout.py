@@ -36,6 +36,10 @@ KEYED_API_HOSTS = frozenset({"api.adzuna.com", "data.usajobs.gov"})
 _MAX_SEARCH_QUERIES = 8
 
 
+class SourceNotConfigured(Exception):
+    """A keyed source is enabled but its API key is not set; the source is skipped."""
+
+
 def clean_text(raw: Any) -> str:
     if not raw:
         return ""
@@ -392,7 +396,7 @@ class ScoutAgent(BaseAgent):
     def fetch_adzuna(self) -> list[Opportunity]:
         app_id, app_key = os.environ.get("ADZUNA_APP_ID", ""), os.environ.get("ADZUNA_APP_KEY", "")
         if not (app_id and app_key):
-            raise ValueError("set ADZUNA_APP_ID and ADZUNA_APP_KEY (free keys from developer.adzuna.com)")
+            raise SourceNotConfigured("no ADZUNA_APP_ID / ADZUNA_APP_KEY set; free keys at developer.adzuna.com")
         t = self.config.targeting
         out: list[Opportunity] = []
         for query in self.search_queries():
@@ -420,8 +424,8 @@ class ScoutAgent(BaseAgent):
         key = os.environ.get("USAJOBS_API_KEY", "")
         email = self.config.politeness.contact_email
         if not (key and email):
-            raise ValueError(
-                "set USAJOBS_API_KEY and politeness.contact_email (USAJOBS requires both; free key at developer.usajobs.gov)"
+            raise SourceNotConfigured(
+                "no USAJOBS_API_KEY / politeness.contact_email set; USAJOBS needs both, free key at developer.usajobs.gov"
             )
         headers = {"Authorization-Key": key, "User-Agent": email}
         out: list[Opportunity] = []
@@ -478,6 +482,8 @@ class ScoutAgent(BaseAgent):
                 jobs.extend(batch)
             except RobotsDisallowedError as exc:
                 log(f"scout/{label}: skipped ({exc.reason})")
+            except SourceNotConfigured as exc:
+                log(f"scout/{label}: skipped ({exc})")
             except Exception as exc:
                 log(f"scout/{label}: failed ({exc})")
         return jobs
