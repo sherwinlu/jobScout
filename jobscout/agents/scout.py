@@ -240,8 +240,47 @@ class ScoutAgent(BaseAgent):
             )
         return out
 
+    def _ashby_board_data(self, slug: str) -> dict[str, Any]:
+        """Parse the public board page (allowed by jobs.ashbyhq.com/robots.txt); {} if it has no app data."""
+        page = self.get_bytes(f"https://jobs.ashbyhq.com/{slug}", accept="text/html").decode("utf-8", "replace")
+        m = re.search(r"window\.__appData\s*=\s*", page)
+        if not m:
+            return {}
+        data, _ = json.JSONDecoder().raw_decode(page[m.end():])
+        return data if isinstance(data, dict) else {}
+
+    def _fetch_ashby_board_page(self, slug: str, display: str) -> list[Opportunity]:
+        """Read postings from the board page when the posting API's robots.txt is unavailable."""
+        board = self._ashby_board_data(slug).get("jobBoard") or {}
+        teams = {t.get("id"): t.get("name") or "" for t in board.get("teams") or [] if isinstance(t, dict)}
+        out: list[Opportunity] = []
+        for j in board.get("jobPostings") or []:
+            loc = j.get("locationName") or ""
+            if (j.get("workplaceType") or "").lower() == "remote":
+                loc += " remote"
+            title = j.get("title") or ""
+            team = teams.get(j.get("teamId"), "")
+            out.append(
+                self._make_job(
+                    "ashby", display, title, loc,
+                    f"https://jobs.ashbyhq.com/{slug}/{j.get('id')}",
+                    f"{title} {team} {loc} {j.get('employmentType') or ''}", j.get("id"),
+                    metadata={"ats": "ashby", "slug": slug, "via": "board-page"},
+                )
+            )
+        return out
+
+    def ashby_org_name(self, slug: str) -> str:
+        try:
+            return str((self._ashby_board_data(slug).get("organization") or {}).get("name") or "")
+        except Exception:
+            return ""
+
     def fetch_ashby(self, slug: str, display: str) -> list[Opportunity]:
-        data = self.get_json(self._ATS_META_URLS["ashby"].format(slug=slug))
+        try:
+            data = self.get_json(self._ATS_META_URLS["ashby"].format(slug=slug))
+        except RobotsDisallowedError:
+            return self._fetch_ashby_board_page(slug, display)
         out: list[Opportunity] = []
         for j in data.get("jobs", []):
             loc = j.get("location") or ""
@@ -640,6 +679,11 @@ class ScoutAgent(BaseAgent):
         if not is_valid_ats_slug(slug):
             return False, ""
         url = self._ATS_META_URLS.get(ats, "").format(slug=slug)
+        if ats == "ashby":
+            try:
+                return len(self.fetch_ashby(slug, slug)) > 0, ""
+            except Exception:
+                return False, ""
         if url:
             try:
                 data = self.get_json(url)
@@ -671,6 +715,11 @@ class ScoutAgent(BaseAgent):
                     continue
                 if ats == "greenhouse" and not self.names_match(name, board_name):
                     continue
+                if ats == "ashby":
+                    # The posting API has no company name; the board page does. Unknown name: accept.
+                    org = self.ashby_org_name(slug)
+                    if org and not self.names_match(name, org):
+                        continue
                 return {"ats": ats, "slug": slug}
         return None
 

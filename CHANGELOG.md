@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 First public pre-release (alpha). The internal `2.0.0` numbering was reset because the project has not yet been validated against live application forms; expect breaking changes before 1.0.
 
 ### Added
+- Ashby boards whose posting API robots.txt is unavailable (HTTP 401) are now read from the public `jobs.ashbyhq.com/<slug>` page, which robots.txt allows, instead of being skipped. Postings from that path carry title, location and workplace type but no description text.
 - Multi-agent architecture with `ScoutAgent`, `RankerAgent`, `ApplierAgent`, and `JobScoutOrchestrator`.
 - RSS/Atom newsfeed and news-article opportunity scouting with automatic ATS board discovery for companies mentioned in funding/hiring news.
 - Local LLM integration (`LocalLLMClient`) supporting Ollama and OpenAI-compatible servers (e.g., `mlx_lm.server`) with automatic heuristic fallback.
