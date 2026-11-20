@@ -184,6 +184,10 @@ class PoliteHttpClient:
                 for k in list(self._locks):
                     if not self._locks[k].locked():
                         del self._locks[k]
+                        if k.startswith("host:"):
+                            h = k[5:]
+                            self._last_request.pop(h, None)
+                            self._host_cooldown.pop(h, None)
                         if len(self._locks) < _MAX_CACHE_ENTRIES:
                             break
             return self._locks.setdefault(key, threading.Lock())

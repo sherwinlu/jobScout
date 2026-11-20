@@ -90,39 +90,52 @@ class ATSPlatformSpec:
         safe_id = urllib.parse.quote(str(job_id), safe="")
         return (self.url_template or "").strip().replace("{slug}", slug).replace("{id}", safe_id)
 
+    @staticmethod
+    def _validate_url_template(
+        tmpl: str,
+        allowed_placeholders: set[str],
+        sample_url: str,
+        label: str,
+        require_placeholders: set[str] | None = None,
+    ) -> str | None:
+        placeholders = set(_PLACEHOLDER_RE.findall(tmpl))
+        if require_placeholders and not require_placeholders.issubset(placeholders):
+            needed = ", ".join(sorted(require_placeholders))
+            return f"{label} must include '{needed}'"
+        if not placeholders.issubset(allowed_placeholders):
+            allowed = ", ".join(sorted(allowed_placeholders))
+            return f"{label} may only contain {allowed} placeholder(s)"
+        stripped = tmpl
+        for token in allowed_placeholders:
+            stripped = stripped.replace(token, "")
+        if "{" in stripped or "}" in stripped:
+            return f"{label} contains unbalanced braces"
+        parsed = urllib.parse.urlsplit(sample_url)
+        if parsed.scheme.lower() != "https":
+            return f"{label} must use https://"
+        return validate_public_url(sample_url)
+
     def validate(self) -> str | None:
         if not is_valid_ats_slug(self.name):
             return f"invalid ATS platform name '{self.name}'"
         tmpl = (self.api_url_template or "").strip()
-        if "{slug}" not in tmpl:
-            return "api_url_template must include '{slug}'"
-        placeholders = set(_PLACEHOLDER_RE.findall(tmpl))
-        if placeholders != {"{slug}"}:
-            return "api_url_template must only contain '{slug}' placeholder"
-        if "{" in tmpl.replace("{slug}", "") or "}" in tmpl.replace("{slug}", ""):
-            return "api_url_template contains unbalanced braces"
-        sample = self.render_api_url("example-co")
-        parsed = urllib.parse.urlsplit(sample)
-        if parsed.scheme.lower() != "https":
-            return "api_url_template must use https://"
-        err = validate_public_url(sample)
+        err = self._validate_url_template(
+            tmpl,
+            allowed_placeholders={"{slug}"},
+            sample_url=self.render_api_url("example-co"),
+            label="api_url_template",
+            require_placeholders={"{slug}"},
+        )
         if err:
             return err
         url_tmpl = (self.url_template or "").strip()
         if url_tmpl:
-            url_placeholders = set(_PLACEHOLDER_RE.findall(url_tmpl))
-            if not url_placeholders.issubset({"{slug}", "{id}"}):
-                return "url_template may only contain '{slug}' and '{id}' placeholders"
-            stripped = url_tmpl.replace("{slug}", "").replace("{id}", "")
-            if "{" in stripped or "}" in stripped:
-                return "url_template contains unbalanced braces"
-            sample_job_url = self.render_job_url("example-co", "123")
-            parsed_job = urllib.parse.urlsplit(sample_job_url)
-            if parsed_job.scheme.lower() != "https":
-                return "url_template must use https://"
-            job_err = validate_public_url(sample_job_url)
-            if job_err:
-                return job_err
+            return self._validate_url_template(
+                url_tmpl,
+                allowed_placeholders={"{slug}", "{id}"},
+                sample_url=self.render_job_url("example-co", "123"),
+                label="url_template",
+            )
         return None
 
     def to_dict(self) -> dict[str, Any]:
