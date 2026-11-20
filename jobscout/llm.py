@@ -11,10 +11,38 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
-from jobscout.security import is_allowed_api_key_env
+from jobscout.http_client import validate_public_url
+from jobscout.security import is_allowed_api_key_env, strip_header_crlf
 from jobscout.storage import log
 
 _MAX_LLM_RESPONSE_BYTES = 5 * 1024 * 1024
+_DEFAULT_URLOPEN = urllib.request.urlopen
+_SENSITIVE_AUTH_HEADERS = frozenset({"authorization", "x-api-key", "x-goog-api-key"})
+
+
+class _SafeLLMRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Prevent credential exfiltration, HTTPS downgrades, or private-IP SSRF on LLM redirects."""
+
+    def __init__(self, is_cloud: bool) -> None:
+        self.is_cloud = is_cloud
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        parsed = urllib.parse.urlsplit(newurl)
+        scheme = parsed.scheme.lower()
+        if self.is_cloud:
+            if scheme != "https":
+                raise _NonRetryableLLMError(f"Blocked insecure redirect from cloud LLM to '{scheme}://'")
+            url_err = validate_public_url(newurl)
+            if url_err:
+                raise _NonRetryableLLMError(f"Blocked unsafe cloud LLM redirect ({url_err})")
+        elif scheme not in {"http", "https"}:
+            raise _NonRetryableLLMError(f"Blocked unsupported LLM redirect scheme '{scheme}'")
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None and parsed.netloc.lower() != req.host.lower():
+            for name in list(new_req.headers):
+                if name.lower() in _SENSITIVE_AUTH_HEADERS:
+                    del new_req.headers[name]
+        return new_req
 
 
 class LocalLLMError(RuntimeError):
@@ -46,9 +74,11 @@ def extract_json_payload(text: str) -> Any:
     except json.JSONDecodeError:
         pass
 
-    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, re.I)
-    if fence_match:
-        return json.loads(fence_match.group(1).strip())
+    for fence_match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw, re.I):
+        try:
+            return json.loads(fence_match.group(1).strip())
+        except json.JSONDecodeError:
+            continue
 
     starts = [i for i in (raw.find("{"), raw.find("[")) if i != -1]
     if not starts:
@@ -212,13 +242,23 @@ class LocalLLMClient:
         if parsed.username or parsed.password:
             return "base_url must not contain embedded credentials"
         scheme = parsed.scheme.lower()
-        if self.is_cloud_provider and scheme != "https":
-            return f"cloud provider '{self.provider}' requires an https:// base_url"
+        if self.is_cloud_provider:
+            if scheme != "https":
+                return f"cloud provider '{self.provider}' requires an https:// base_url"
+            pub_err = validate_public_url(self.base_url)
+            if pub_err:
+                return f"cloud provider '{self.provider}' base_url is unsafe ({pub_err})"
         if scheme not in {"http", "https"}:
             return f"unsupported base_url scheme '{scheme}'"
         if not parsed.hostname:
             return "missing host in base_url"
         return None
+
+    def _open_url(self, req: urllib.request.Request, timeout: int) -> Any:
+        if urllib.request.urlopen is not _DEFAULT_URLOPEN:
+            return urllib.request.urlopen(req, timeout=timeout)
+        opener = urllib.request.build_opener(_SafeLLMRedirectHandler(self.is_cloud_provider))
+        return opener.open(req, timeout=timeout)
 
     def _resolve_api_key(self) -> str:
         if self.api_key_env and is_allowed_api_key_env(self.api_key_env):
@@ -279,10 +319,14 @@ class LocalLLMClient:
             else ("/v1/models", "data", "id")
         )
         try:
-            with urllib.request.urlopen(urllib.request.Request(f"{self.base_url}{path}"), timeout=3) as resp:
+            with self._open_url(urllib.request.Request(f"{self.base_url}{path}"), timeout=3) as resp:
                 raw_bytes = self._read_bounded(resp)
                 data = json.loads(raw_bytes.decode("utf-8"))
-            names = [m.get(name_key, "") for m in data.get(list_key, []) if m.get(name_key)]
+            if not isinstance(data, dict):
+                self.unavailable_reason = f"unexpected non-object JSON from {self.provider}"
+                self._available_cache = False
+                return False
+            names = [m.get(name_key, "") for m in (data.get(list_key) or []) if isinstance(m, dict) and m.get(name_key)]
             if self.model not in names:
                 avail = ", ".join(names[:5]) or "none"
                 self.unavailable_reason = (
@@ -455,7 +499,8 @@ class LocalLLMClient:
                 "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
                 "generationConfig": gen_cfg,
             }
-            url = f"{self.base_url}/v1beta/models/{self.model}:generateContent"
+            encoded_model = urllib.parse.quote(self.model, safe="._-:")
+            url = f"{self.base_url}/v1beta/models/{encoded_model}:generateContent"
             raw = self._post_json(url, payload, extra_headers={"x-goog-api-key": self._resolve_api_key()})
             candidates = raw.get("candidates") or []
             if not candidates:
@@ -519,7 +564,8 @@ class LocalLLMClient:
             raise _NonRetryableLLMError(url_err)
         headers = {"Content-Type": "application/json"}
         if extra_headers:
-            headers.update(extra_headers)
+            for k, v in extra_headers.items():
+                headers[strip_header_crlf(k)] = strip_header_crlf(v)
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -527,12 +573,15 @@ class LocalLLMClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(self._read_bounded(resp).decode("utf-8"))
+            with self._open_url(req, timeout=self.timeout) as resp:
+                parsed = json.loads(self._read_bounded(resp).decode("utf-8"))
+                if not isinstance(parsed, dict):
+                    raise _NonRetryableLLMError(f"Expected JSON object from LLM server, got {type(parsed).__name__}")
+                return parsed
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
-                detail = exc.read().decode("utf-8", errors="ignore")[:300]
+                detail = exc.read(4096).decode("utf-8", errors="ignore")[:300]
             except Exception:
                 pass
             retry_after = _parse_retry_after(exc.headers)

@@ -234,21 +234,29 @@ class ScoutAgent(BaseAgent):
     def fetch_greenhouse(self, slug: str, display: str) -> list[Opportunity]:
         url = f"{self._ATS_META_URLS['greenhouse'].format(slug=slug)}/jobs?content=true"
         data = self.get_json(url)
+        if not isinstance(data, dict):
+            return []
         return [
             self._make_job(
                 "greenhouse", display, j.get("title"),
-                (j.get("location") or {}).get("name"),
+                (j.get("location") or {}).get("name") if isinstance(j.get("location"), dict) else None,
                 j.get("absolute_url"), j.get("content"), j.get("id"),
                 metadata={"ats": "greenhouse", "slug": slug},
             )
-            for j in data.get("jobs", [])
+            for j in (data.get("jobs") or [])
+            if isinstance(j, dict)
         ]
 
     def fetch_lever(self, slug: str, display: str) -> list[Opportunity]:
         data = self.get_json(self._ATS_META_URLS["lever"].format(slug=slug))
+        if not isinstance(data, list):
+            return []
         out: list[Opportunity] = []
         for j in data:
-            loc = (j.get("categories") or {}).get("location") or ""
+            if not isinstance(j, dict):
+                continue
+            loc = (j.get("categories") or {}).get("location") if isinstance(j.get("categories"), dict) else ""
+            loc = loc or ""
             if j.get("workplaceType") == "remote":
                 loc += " remote"
             out.append(
@@ -275,15 +283,18 @@ class ScoutAgent(BaseAgent):
         teams = {t.get("id"): t.get("name") or "" for t in board.get("teams") or [] if isinstance(t, dict)}
         out: list[Opportunity] = []
         for j in board.get("jobPostings") or []:
+            if not isinstance(j, dict) or not j.get("id"):
+                continue
             loc = j.get("locationName") or ""
             if (j.get("workplaceType") or "").lower() == "remote":
                 loc += " remote"
             title = j.get("title") or ""
             team = teams.get(j.get("teamId"), "")
+            safe_jid = urllib.parse.quote(str(j.get("id")), safe="")
             out.append(
                 self._make_job(
                     "ashby", display, title, loc,
-                    f"https://jobs.ashbyhq.com/{slug}/{j.get('id')}",
+                    f"https://jobs.ashbyhq.com/{slug}/{safe_jid}",
                     f"{title} {team} {loc} {j.get('employmentType') or ''}", j.get("id"),
                     metadata={"ats": "ashby", "slug": slug, "via": "board-page"},
                 )
@@ -339,7 +350,7 @@ class ScoutAgent(BaseAgent):
         custom = self._custom_ats_specs()
         if ats in custom:
             spec = custom[ats]
-            data = self.get_json(spec.api_url_template.format(slug=slug))
+            data = self.get_json(spec.render_api_url(slug))
             return extract_generic_jobs(data, spec, slug, display, self._make_job)
         raise ValueError(f"Unknown ATS: {ats}")
 
@@ -493,13 +504,18 @@ class ScoutAgent(BaseAgent):
                 "https://hn.algolia.com/api/v1/search_by_date"
                 "?tags=story,author_whoishiring&hitsPerPage=10"
             )
+            if not isinstance(res, dict):
+                return out
             story = next(
-                (h for h in res.get("hits", []) if "who is hiring" in (h.get("title") or "").lower()),
+                (h for h in (res.get("hits") or []) if isinstance(h, dict) and "who is hiring" in (h.get("title") or "").lower()),
                 None,
             )
-            if not story:
+            if not story or not story.get("objectID"):
                 return out
-            item = self.get_json(f"https://hn.algolia.com/api/v1/items/{story['objectID']}")
+            safe_oid = urllib.parse.quote(str(story["objectID"]), safe="")
+            item = self.get_json(f"https://hn.algolia.com/api/v1/items/{safe_oid}")
+            if not isinstance(item, dict):
+                return out
         except RobotsDisallowedError as exc:
             log(f"scout/hn: skipped ({exc.reason})")
             return out
@@ -670,7 +686,14 @@ class ScoutAgent(BaseAgent):
             f"{wrap_untrusted('untrusted_article', article_text, 3000)}"
         )
         data = self.llm.chat_json(sys_prompt, user_prompt)
-        companies = [str(c).strip() for c in (data.get("companies") or []) if str(c).strip()]
+        if not isinstance(data, dict):
+            return [], None
+        raw_companies = data.get("companies")
+        companies = (
+            [str(c).strip() for c in raw_companies if str(c).strip()]
+            if isinstance(raw_companies, list)
+            else []
+        )
         signal_type = str(data.get("signal_type") or "none")
         if not bool(data.get("is_opportunity")) or signal_type == "none":
             return companies, None
@@ -808,7 +831,7 @@ class ScoutAgent(BaseAgent):
         if ats in custom:
             spec = custom[ats]
             try:
-                data = self.get_json(spec.api_url_template.format(slug=slug))
+                data = self.get_json(spec.render_api_url(slug))
                 jobs = extract_generic_jobs(data, spec, slug, slug, self._make_job)
                 return len(jobs) > 0, ""
             except Exception:
@@ -931,7 +954,7 @@ class ScoutAgent(BaseAgent):
     ) -> ScoutReport:
         self.llm.ensure_available()
         state = self.storage.load_targets_state()
-        limit = max_new if max_new is not None else self.config.max_new_resolutions
+        limit = max(0, max_new if max_new is not None else self.config.max_new_resolutions)
 
         feed_jobs = self.fetch_feed_jobs() if (build or scan_boards) else []
         news_companies: list[str] = []

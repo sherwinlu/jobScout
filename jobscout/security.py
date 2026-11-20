@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ def wrap_untrusted(tag: str, text: str, max_len: int | None = None) -> str:
     """Wrap untrusted text in explicit XML-like delimiters to harden LLM prompts."""
     safe_tag = re.sub(r"[^a-zA-Z0-9_]", "_", tag)
     cleaned = sanitize_untrusted_text(text, max_len=max_len)
-    cleaned = cleaned.replace(f"</{safe_tag}>", f"< /{safe_tag}>")
+    cleaned = re.sub(rf"</\s*{re.escape(safe_tag)}\s*>", f"< /{safe_tag}>", cleaned, flags=re.I)
     return f"<{safe_tag}>\n{cleaned}\n</{safe_tag}>"
 
 
@@ -107,9 +108,33 @@ def harden_file_permissions(path: Path) -> None:
             pass
 
 
-def write_private_text(path: Path, content: str, encoding: str = "utf-8") -> Path:
-    """Write text to disk with restrictive owner-only file and directory permissions."""
+def write_private_bytes(path: Path, data: bytes) -> Path:
+    """Atomically write bytes with owner-only permissions (0600) from creation on POSIX."""
     ensure_private_dir(path.parent)
-    path.write_text(content, encoding=encoding)
-    harden_file_permissions(path)
+    if os.name != "posix":
+        path.write_bytes(data)
+        return path
+
+    tmp_path = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(tmp_path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return path
+
+
+def write_private_text(path: Path, content: str, encoding: str = "utf-8") -> Path:
+    """Write text to disk atomically with restrictive owner-only file and directory permissions."""
+    return write_private_bytes(path, content.encode(encoding))

@@ -492,81 +492,99 @@ class ApplierAgent(BaseAgent):
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.config.applier.headless)
-            context = browser.new_context()
             try:
-                if hasattr(context, "route"):
-                    context.route("**/*", self._route_guard)
-            except Exception:
-                pass
-            page = context.new_page()
-            page.set_default_timeout(self.config.applier.timeout_ms)
+                context = browser.new_context()
+                try:
+                    if hasattr(context, "route"):
+                        context.route("**/*", self._route_guard)
+                except Exception:
+                    pass
+                page = context.new_page()
+                page.set_default_timeout(self.config.applier.timeout_ms)
 
-            log(f"applier: opening {opp.url}")
-            page.goto(opp.url, wait_until="domcontentloaded")
-            page.wait_for_timeout(1500)
+                log(f"applier: opening {opp.url}")
+                page.goto(opp.url, wait_until="domcontentloaded")
+                page.wait_for_timeout(1500)
 
-            self._maybe_open_apply_form(page)
-            page.wait_for_timeout(1000)
-            self._follow_greenhouse_embed(page)
+                self._maybe_open_apply_form(page)
+                page.wait_for_timeout(1000)
+                self._follow_greenhouse_embed(page)
 
-            submit_btn = None
-            nav_err = self._validate_landed_url(page)
-            if nav_err:
-                draft.notes = f"Blocked unsafe navigated URL ({nav_err}); skipped auto-filling."
-                log(f"applier: {draft.notes}")
-                app_form = None
-            else:
-                app_form = self._locate_application_form(page)
-
-            if app_form is None and not nav_err:
-                draft.notes = (
-                    "Could not isolate a dedicated job application form on the page; "
-                    "skipped auto-filling to protect personal data."
-                )
-                log(f"applier: {draft.notes}")
-            elif app_form is not None:
-                action_err = self._validate_form_action(page, app_form)
-                if action_err:
-                    draft.notes = f"Blocked unsafe form action ({action_err}); skipped auto-filling."
+                submit_btn = None
+                nav_err = self._validate_landed_url(page)
+                if nav_err:
+                    draft.notes = f"Blocked unsafe navigated URL ({nav_err}); skipped auto-filling."
                     log(f"applier: {draft.notes}")
+                    app_form = None
                 else:
-                    self._fill_visible_form(page, app_form, opp, draft, chosen_resume)
-                    submit_btn = self._locate_submit_button(app_form)
-                    if submit_btn is not None:
-                        try:
-                            submit_btn.scroll_into_view_if_needed()
-                            submit_btn.evaluate(
-                                "el => { el.style.outline = '4px solid #e11d48'; el.style.outlineOffset = '3px'; }"
-                            )
-                        except Exception:
-                            pass
+                    app_form = self._locate_application_form(page)
 
-            try:
-                page.screenshot(path=str(screenshot_path), full_page=True)
-                harden_file_permissions(screenshot_path)
-                draft.screenshot_path = str(screenshot_path)
-            except Exception as exc:
-                log(f"applier: screenshot failed ({exc})")
+                if app_form is None and not nav_err:
+                    draft.notes = (
+                        "Could not isolate a dedicated job application form on the page; "
+                        "skipped auto-filling to protect personal data."
+                    )
+                    log(f"applier: {draft.notes}")
+                elif app_form is not None:
+                    action_err = self._validate_form_action(page, app_form)
+                    if action_err:
+                        draft.notes = f"Blocked unsafe form action ({action_err}); skipped auto-filling."
+                        log(f"applier: {draft.notes}")
+                    else:
+                        self._fill_visible_form(page, app_form, opp, draft, chosen_resume)
+                        submit_btn = self._locate_submit_button(app_form)
+                        if submit_btn is not None:
+                            btn_action_err = self._validate_submit_formaction(page, submit_btn)
+                            if btn_action_err:
+                                draft.notes = f"Blocked unsafe submit formaction ({btn_action_err}); disabled automated submit."
+                                log(f"applier: {draft.notes}")
+                                submit_btn = None
+                            else:
+                                try:
+                                    submit_btn.scroll_into_view_if_needed()
+                                    submit_btn.evaluate(
+                                        "el => { el.style.outline = '4px solid #e11d48'; el.style.outlineOffset = '3px'; }"
+                                    )
+                                except Exception:
+                                    pass
 
-            draft.status = "ready_for_review"
-            self.storage.save_application_draft(draft)
+                try:
+                    page.screenshot(path=str(screenshot_path), full_page=True)
+                    harden_file_permissions(screenshot_path)
+                    draft.screenshot_path = str(screenshot_path)
+                except Exception as exc:
+                    log(f"applier: screenshot failed ({exc})")
 
-            prompt_fn = approval_callback or self._default_approval_prompt
-            decision = prompt_fn(draft)
+                draft.status = "ready_for_review"
+                self.storage.save_application_draft(draft)
 
-            if decision == "submit" and submit_btn is not None:
-                log("applier: user approved SUBMIT -> clicking submit button")
-                submit_btn.click()
-                page.wait_for_timeout(2500)
-                draft.status = "submitted"
-            elif decision == "done":
-                draft.status = "submitted_by_user"
-            else:
-                log("applier: submission aborted/cancelled by user (form NOT submitted)")
-                draft.status = "aborted"
+                prompt_fn = approval_callback or self._default_approval_prompt
+                decision = prompt_fn(draft)
 
-            self.storage.save_application_draft(draft)
-            browser.close()
+                if decision == "submit" and submit_btn is not None:
+                    pre_click_err = (
+                        self._validate_landed_url(page)
+                        or self._validate_form_action(page, app_form)
+                        or self._validate_submit_formaction(page, submit_btn)
+                    )
+                    if pre_click_err:
+                        draft.notes = f"Blocked unsafe submission target ({pre_click_err}); form NOT submitted."
+                        log(f"applier: {draft.notes}")
+                        draft.status = "aborted"
+                    else:
+                        log("applier: user approved SUBMIT -> clicking submit button")
+                        submit_btn.click()
+                        page.wait_for_timeout(2500)
+                        draft.status = "submitted"
+                elif decision == "done":
+                    draft.status = "submitted_by_user"
+                else:
+                    log("applier: submission aborted/cancelled by user (form NOT submitted)")
+                    draft.status = "aborted"
+
+                self.storage.save_application_draft(draft)
+            finally:
+                browser.close()
 
         return draft
 
@@ -586,11 +604,7 @@ class ApplierAgent(BaseAgent):
         return validate_public_url(landed)
 
     @staticmethod
-    def _validate_form_action(page: Any, app_form: Any) -> str | None:
-        try:
-            action = app_form.get_attribute("action")
-        except Exception:
-            return None
+    def _validate_action_url(page: Any, action: Any) -> str | None:
         if not isinstance(action, str) or not action.strip():
             return None
         base_url = getattr(page, "url", "")
@@ -610,6 +624,22 @@ class ApplierAgent(BaseAgent):
             return "insecure HTTP form action on HTTPS page"
         return None
 
+    @classmethod
+    def _validate_form_action(cls, page: Any, app_form: Any) -> str | None:
+        try:
+            action = app_form.get_attribute("action")
+        except Exception:
+            return None
+        return cls._validate_action_url(page, action)
+
+    @classmethod
+    def _validate_submit_formaction(cls, page: Any, submit_btn: Any) -> str | None:
+        try:
+            action = submit_btn.get_attribute("formaction")
+        except Exception:
+            return None
+        return cls._validate_action_url(page, action)
+
     @staticmethod
     def _follow_greenhouse_embed(page: Any, wait_ms: int = 4000) -> bool:
         """Open a Greenhouse application form that a company's own careers page embeds in an iframe.
@@ -626,7 +656,7 @@ class ApplierAgent(BaseAgent):
             target = urllib.parse.urljoin(str(page.url), str(frame_el.get_attribute("src") or "").strip())
             parsed = urllib.parse.urlsplit(target)
             host = (parsed.hostname or "").lower()
-            if parsed.scheme != "https" or not (host == "greenhouse.io" or host.endswith(".greenhouse.io")):
+            if parsed.scheme.lower() != "https" or not (host == "greenhouse.io" or host.endswith(".greenhouse.io")):
                 return False
             if validate_public_url(target) is not None:
                 return False

@@ -116,7 +116,7 @@ class JobScoutOrchestrator:
         """Resolve either a 1-based queue index, an opportunity ID, or a direct job URL."""
         if target.isdigit():
             idx = int(target) - 1
-            queue = self.get_queue(limit=100, include_skipped=True)
+            queue = self.get_queue(limit=100, include_skipped=False)
             if 0 <= idx < len(queue):
                 return queue[idx].opportunity
             return None

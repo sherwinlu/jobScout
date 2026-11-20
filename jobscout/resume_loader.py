@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
@@ -14,7 +15,8 @@ _MAX_DOCX_TOTAL_BYTES = 25 * 1024 * 1024
 def extract_docx_text(path: Path) -> str:
     """Extract readable text from a .docx file using Python stdlib only."""
     paragraphs: list[str] = []
-    total_bytes = 0
+    declared_total = 0
+    actual_total = 0
     with zipfile.ZipFile(path, "r") as zf:
         xml_names = sorted(
             (n for n in zf.namelist() if re.match(r"^word/(document|header\d*|footer\d*)\.xml$", n)),
@@ -24,15 +26,19 @@ def extract_docx_text(path: Path) -> str:
             info = zf.getinfo(name)
             if info.file_size > _MAX_DOCX_XML_BYTES:
                 raise ValueError(f"DOCX entry '{name}' exceeds size limit")
-            total_bytes += info.file_size
-            if total_bytes > _MAX_DOCX_TOTAL_BYTES:
+            declared_total += info.file_size
+            if declared_total > _MAX_DOCX_TOTAL_BYTES:
                 raise ValueError("DOCX total XML content exceeds size limit")
+            with zf.open(info, "r") as fh:
+                raw_entry = fh.read(_MAX_DOCX_XML_BYTES + 1)
+            if len(raw_entry) > _MAX_DOCX_XML_BYTES:
+                raise ValueError(f"DOCX entry '{name}' exceeds decompressed size limit")
+            actual_total += len(raw_entry)
+            if actual_total > _MAX_DOCX_TOTAL_BYTES:
+                raise ValueError("DOCX total decompressed XML content exceeds size limit")
             try:
-                raw_entry = zf.open(info, "r").read(_MAX_DOCX_XML_BYTES + 1)
-                if len(raw_entry) > _MAX_DOCX_XML_BYTES:
-                    raise ValueError(f"DOCX entry '{name}' exceeds decompressed size limit")
                 root = parse_xml_bytes(raw_entry)
-            except Exception:
+            except ET.ParseError:
                 continue
             for para in root.iter(f"{WORD_NS}p"):
                 line = "".join(node.text for node in para.iter(f"{WORD_NS}t") if node.text).strip()

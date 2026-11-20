@@ -317,11 +317,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         return cmd_init(args.dir or args.home)
 
-    config = load_config(
-        home_dir=args.home,
-        profile_path=args.profile,
-        resume_path=args.resume,
-    )
+    try:
+        config = load_config(
+            home_dir=args.home,
+            profile_path=args.profile,
+            resume_path=args.resume,
+        )
+    except (ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     if args.llm_provider:
         config.llm.provider = args.llm_provider
     if args.llm_model:
@@ -349,13 +353,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list_targets(orch)
 
     if cmd == "queue":
+        limit = max(0, args.limit)
         items = orch.get_queue(
-            limit=args.limit,
+            limit=limit,
             min_score=args.min_score,
             include_skipped=args.include_skipped,
             kind=args.kind,
         )
-        print_ranked_list(items, limit=args.limit)
+        print_ranked_list(items, limit=limit)
         if items:
             print("\nNext: run `job-scout apply 1` to fill out #1 (waits for approval before submit).")
         return 0
@@ -428,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
             if result.ranked:
                 print("\nReview queue with `job-scout queue` or apply with `job-scout apply 1`.")
         return 0
-    except LocalLLMError as exc:
+    except (LocalLLMError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

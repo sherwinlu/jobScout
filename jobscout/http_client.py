@@ -16,6 +16,7 @@ from jobscout.security import strip_header_crlf
 
 _DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
+_MAX_CACHE_ENTRIES = 1024
 
 
 class RobotsDisallowedError(RuntimeError):
@@ -175,12 +176,22 @@ class PoliteHttpClient:
 
     def _lock_for(self, key: str) -> threading.Lock:
         with self._meta_lock:
+            lock = self._locks.get(key)
+            if lock is not None:
+                return lock
+            if len(self._locks) >= _MAX_CACHE_ENTRIES:
+                # Evict unlocked entries to bound memory under high-cardinality crawling.
+                for k in list(self._locks):
+                    if not self._locks[k].locked():
+                        del self._locks[k]
+                        if len(self._locks) < _MAX_CACHE_ENTRIES:
+                            break
             return self._locks.setdefault(key, threading.Lock())
 
     @staticmethod
     def _origin_and_host(url: str) -> tuple[str, str]:
         parsed = urllib.parse.urlsplit(url)
-        return f"{parsed.scheme}://{parsed.netloc}", parsed.netloc.lower()
+        return f"{parsed.scheme.lower()}://{parsed.netloc}", parsed.netloc.lower()
 
     def _build_headers(self, accept: str) -> dict[str, str]:
         headers = {
@@ -217,7 +228,7 @@ class PoliteHttpClient:
     def _read_response_bytes(cls, resp: Any, max_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES) -> bytes:
         raw = cls._read_bounded_raw(resp, max_bytes)
         headers = getattr(resp, "headers", None)
-        if headers and (headers.get("Content-Encoding") or "").lower() == "gzip":
+        if headers and (headers.get("Content-Encoding") or "").strip().lower() in {"gzip", "x-gzip"}:
             dec = zlib.decompressobj(16 + zlib.MAX_WBITS)
             out = dec.decompress(raw, max_bytes + 1)
             if len(out) > max_bytes or dec.unconsumed_tail:
@@ -291,6 +302,8 @@ class PoliteHttpClient:
             if cached is None:
                 cached = self._fetch_robots_policy(origin, host)
                 with self._meta_lock:
+                    if len(self._robots_cache) >= _MAX_CACHE_ENTRIES:
+                        self._robots_cache.pop(next(iter(self._robots_cache)), None)
                     self._robots_cache[origin] = cached
             return cached
 
@@ -303,7 +316,8 @@ class PoliteHttpClient:
             return True, self.min_delay_seconds, ""
 
         origin, host = self._origin_and_host(url)
-        if host in self.robots_exempt_hosts and origin.startswith("https://"):
+        hostname = (urllib.parse.urlsplit(url).hostname or "").lower()
+        if (host in self.robots_exempt_hosts or hostname in self.robots_exempt_hosts) and origin.startswith("https://"):
             return True, max(self.min_delay_seconds, _API_MIN_DELAY_SECONDS), ""
         policy = self._get_robots_policy(origin, host)
         if policy.disallow_all:

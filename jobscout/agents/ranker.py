@@ -168,13 +168,24 @@ class RankerAgent(BaseAgent):
         )
 
         data = self.llm.chat_json(sys_prompt, user_prompt)
-        llm_score = max(0, min(100, int(data.get("match_score", 50))))
+        if not isinstance(data, dict):
+            data = {}
+        raw_score = data.get("match_score", 50)
+        try:
+            llm_score = max(0, min(100, int(float(raw_score))))
+        except (TypeError, ValueError):
+            llm_score = 50
         verdict = str(data.get("verdict") or "").strip().lower()
         if verdict not in {"strong_match", "good_match", "stretch", "skip"}:
             verdict = verdict_from_score(llm_score, targeting.min_match_score)
 
         h100 = heuristic_to_100(heuristic_pts)
         final_score = round(0.75 * llm_score + 0.25 * h100, 1)
+
+        raw_strengths = data.get("strengths")
+        raw_gaps = data.get("gaps")
+        strengths = [str(s) for s in raw_strengths][:4] if isinstance(raw_strengths, list) else []
+        gaps = [str(g) for g in raw_gaps][:4] if isinstance(raw_gaps, list) else []
 
         return RankedOpportunity(
             opportunity=opp,
@@ -183,8 +194,8 @@ class RankerAgent(BaseAgent):
             final_score=final_score,
             verdict=verdict,
             matched_keywords=matched,
-            strengths=[str(s) for s in (data.get("strengths") or [])][:4],
-            gaps=[str(g) for g in (data.get("gaps") or [])][:4],
+            strengths=strengths,
+            gaps=gaps,
             recommended_angle=str(data.get("recommended_angle") or "").strip(),
             eval_mode="llm",
             ranked_at=now_iso(),

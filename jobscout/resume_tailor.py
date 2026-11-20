@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import io
 import re
-import shutil
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
@@ -15,11 +15,11 @@ from jobscout.llm import LocalLLMClient
 from jobscout.models import Opportunity, ResumeProfile
 from jobscout.security import (
     ensure_private_dir,
-    harden_file_permissions,
     redact_pii_for_llm,
     sanitize_untrusted_text,
     strip_xml_control_chars,
     wrap_untrusted,
+    write_private_bytes,
     write_private_text,
 )
 from jobscout.storage import log
@@ -72,12 +72,12 @@ def markdown_to_docx(markdown_text: str, out_path: Path) -> Path:
     )
     ET.fromstring(doc_xml.encode("utf-8"))
 
-    ensure_private_dir(out_path.parent)
-    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", _CONTENT_TYPES_XML)
         zf.writestr("_rels/.rels", _ROOT_RELS_XML)
         zf.writestr("word/document.xml", doc_xml)
-    harden_file_permissions(out_path)
+    write_private_bytes(out_path, buf.getvalue())
     return out_path
 
 
@@ -348,7 +348,8 @@ def _select_with_llm(
         data = {}
 
     dropped: set[int] = set()
-    for lid in data.get("drop") or []:
+    raw_drop = data.get("drop")
+    for lid in raw_drop if isinstance(raw_drop, list) else []:
         if len(dropped) >= max_drop:
             break
         i = listed.get(str(lid).strip().upper())
@@ -356,7 +357,8 @@ def _select_with_llm(
             dropped.add(i)
     by_key = {e.key: e for e in extras}
     chosen: list[_Extra] = []
-    for key in data.get("highlights") or []:
+    raw_highlights = data.get("highlights")
+    for key in raw_highlights if isinstance(raw_highlights, list) else []:
         extra = by_key.get(str(key).strip().upper())
         if extra is not None and extra not in chosen and len(chosen) < _MAX_HIGHLIGHTS:
             chosen.append(extra)
@@ -440,8 +442,7 @@ def tailor_resume_for_opportunity(
     original = Path(base.file_path) if base.file_path else None
     if not changed and original is not None and original.suffix.lower() == ".docx" and original.exists():
         # Nothing was dropped or added: attach the candidate's own formatted file, not a plainer regeneration.
-        shutil.copy2(original, docx_path)
-        harden_file_permissions(docx_path)
+        write_private_bytes(docx_path, original.read_bytes())
     else:
         markdown_to_docx(md_text, docx_path)
     return docx_path, md_path, md_text
