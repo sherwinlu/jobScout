@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import re
 import xml.etree.ElementTree as ET
 import zipfile
@@ -13,11 +14,11 @@ from jobscout.llm import LocalLLMClient
 from jobscout.models import Opportunity, ResumeProfile
 from jobscout.security import (
     ensure_private_dir,
-    harden_file_permissions,
     redact_pii_for_llm,
     sanitize_untrusted_text,
     strip_xml_control_chars,
     wrap_untrusted,
+    write_private_bytes,
     write_private_text,
 )
 from jobscout.storage import log
@@ -102,12 +103,12 @@ def letter_to_docx(letter_text: str, out_path: Path) -> Path:
     )
     ET.fromstring(doc_xml.encode("utf-8"))
 
-    ensure_private_dir(out_path.parent)
-    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", _CONTENT_TYPES_XML)
         zf.writestr("_rels/.rels", _ROOT_RELS_XML)
         zf.writestr("word/document.xml", doc_xml)
-    harden_file_permissions(out_path)
+    write_private_bytes(out_path, buf.getvalue())
     return out_path
 
 
@@ -176,13 +177,17 @@ def _synthesize_with_llm(
         f"Sample Cover Letters:\n{samples_blob}"
     )
     data = llm.chat_json(sys_prompt, user_prompt)
+    if not isinstance(data, dict):
+        raise ValueError("LLM cover letter response was not a JSON object")
     lines = _format_letter_header(cand)
     lines.append(str(data.get("salutation") or f"Dear {opp.company} Hiring Team,").strip())
     lines.append("")
     opening = str(data.get("opening") or "").strip()
     if opening:
         lines += [opening, ""]
-    for para in data.get("body_paragraphs") or []:
+    raw_paras = data.get("body_paragraphs")
+    paras = raw_paras if isinstance(raw_paras, list) else ([raw_paras] if isinstance(raw_paras, str) and raw_paras.strip() else [])
+    for para in paras:
         p = str(para).strip()
         if p:
             lines += [p, ""]

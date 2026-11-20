@@ -49,6 +49,21 @@ def _extract_dotted(obj: Any, path: str) -> Any:
     return cur
 
 
+_PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
+
+
+def _str_list(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def _dict_list(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    return [x for x in raw if isinstance(x, dict)]
+
+
 @dataclass
 class ATSPlatformSpec:
     """Declarative specification for polling a public JSON ATS platform."""
@@ -68,17 +83,60 @@ class ATSPlatformSpec:
     quality_score: float = 50.0
     empty_runs: int = 0
 
+    def render_api_url(self, slug: str) -> str:
+        return (self.api_url_template or "").strip().replace("{slug}", slug)
+
+    def render_job_url(self, slug: str, job_id: Any) -> str:
+        safe_id = urllib.parse.quote(str(job_id), safe="")
+        return (self.url_template or "").strip().replace("{slug}", slug).replace("{id}", safe_id)
+
+    @staticmethod
+    def _validate_url_template(
+        tmpl: str,
+        allowed_placeholders: set[str],
+        sample_url: str,
+        label: str,
+        require_placeholders: set[str] | None = None,
+    ) -> str | None:
+        placeholders = set(_PLACEHOLDER_RE.findall(tmpl))
+        if require_placeholders and not require_placeholders.issubset(placeholders):
+            needed = ", ".join(sorted(require_placeholders))
+            return f"{label} must include '{needed}'"
+        if not placeholders.issubset(allowed_placeholders):
+            allowed = ", ".join(sorted(allowed_placeholders))
+            return f"{label} may only contain {allowed} placeholder(s)"
+        stripped = tmpl
+        for token in allowed_placeholders:
+            stripped = stripped.replace(token, "")
+        if "{" in stripped or "}" in stripped:
+            return f"{label} contains unbalanced braces"
+        parsed = urllib.parse.urlsplit(sample_url)
+        if parsed.scheme.lower() != "https":
+            return f"{label} must use https://"
+        return validate_public_url(sample_url)
+
     def validate(self) -> str | None:
         if not is_valid_ats_slug(self.name):
             return f"invalid ATS platform name '{self.name}'"
         tmpl = (self.api_url_template or "").strip()
-        if "{slug}" not in tmpl:
-            return "api_url_template must include '{slug}'"
-        sample = tmpl.format(slug="example-co")
-        parsed = urllib.parse.urlsplit(sample)
-        if parsed.scheme.lower() != "https":
-            return "api_url_template must use https://"
-        return validate_public_url(sample)
+        err = self._validate_url_template(
+            tmpl,
+            allowed_placeholders={"{slug}"},
+            sample_url=self.render_api_url("example-co"),
+            label="api_url_template",
+            require_placeholders={"{slug}"},
+        )
+        if err:
+            return err
+        url_tmpl = (self.url_template or "").strip()
+        if url_tmpl:
+            return self._validate_url_template(
+                url_tmpl,
+                allowed_placeholders={"{slug}", "{id}"},
+                sample_url=self.render_job_url("example-co", "123"),
+                label="url_template",
+            )
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -200,7 +258,7 @@ def extract_generic_jobs(
         jid = _extract_dotted(item, spec.id_key) or title
         url = _extract_dotted(item, spec.url_key)
         if (not url or not str(url).startswith(("http://", "https://"))) and spec.url_template and jid:
-            url = spec.url_template.format(slug=slug, id=jid)
+            url = spec.render_job_url(slug, jid)
         desc = _extract_dotted(item, spec.description_key) or title or ""
         if title:
             out.append(
@@ -423,11 +481,13 @@ class CuratorAgent(BaseAgent):
         )
         try:
             data = self.llm.chat_json(sys_prompt, user_prompt)
+            if not isinstance(data, dict):
+                data = {}
             return {
-                "prune_boards": [str(x).strip() for x in (data.get("prune_boards") or []) if str(x).strip()],
-                "prune_feeds": [str(x).strip() for x in (data.get("prune_feeds") or []) if str(x).strip()],
-                "prune_news_sites": [str(x).strip() for x in (data.get("prune_news_sites") or []) if str(x).strip()],
-                "prune_ats_platforms": [str(x).strip().lower() for x in (data.get("prune_ats_platforms") or []) if str(x).strip()],
+                "prune_boards": _str_list(data.get("prune_boards")),
+                "prune_feeds": _str_list(data.get("prune_feeds")),
+                "prune_news_sites": _str_list(data.get("prune_news_sites")),
+                "prune_ats_platforms": [x.lower() for x in _str_list(data.get("prune_ats_platforms"))],
             }
         except Exception as exc:
             log(f"curator: source prune LLM review skipped ({exc})")
@@ -466,11 +526,13 @@ class CuratorAgent(BaseAgent):
         )
         try:
             data = self.llm.chat_json(sys_prompt, user_prompt)
+            if not isinstance(data, dict):
+                data = {}
             return {
-                "feeds": [x for x in (data.get("feeds") or []) if isinstance(x, dict)],
-                "news_sites": [x for x in (data.get("news_sites") or []) if isinstance(x, dict)],
-                "companies": [x for x in (data.get("companies") or []) if isinstance(x, dict)],
-                "ats_platforms": [x for x in (data.get("ats_platforms") or []) if isinstance(x, dict)],
+                "feeds": _dict_list(data.get("feeds")),
+                "news_sites": _dict_list(data.get("news_sites")),
+                "companies": _dict_list(data.get("companies")),
+                "ats_platforms": _dict_list(data.get("ats_platforms")),
             }
         except Exception as exc:
             log(f"curator: source discovery LLM ideation skipped ({exc})")
@@ -485,7 +547,7 @@ class CuratorAgent(BaseAgent):
         )
         user_prompt = (
             f"{self._candidate_context()}\n\n"
-            f"Candidate {kind}: {sanitize_untrusted_text(name, 120)} ({url})\n"
+            f"Candidate {kind}: {sanitize_untrusted_text(name, 120)} ({sanitize_untrusted_text(url, 300)})\n"
             f"{wrap_untrusted('untrusted_source_sample', sample_text, 2000)}"
         )
         try:
@@ -522,6 +584,10 @@ class CuratorAgent(BaseAgent):
             )
             root = parse_xml_bytes(raw)
         except Exception:
+            return False
+
+        local_tag = root.tag.rsplit("}", 1)[-1].lower()
+        if local_tag not in {"rss", "feed", "rdf"}:
             return False
 
         # Extract sample headlines/titles to judge applicability.
@@ -583,7 +649,7 @@ class CuratorAgent(BaseAgent):
             spec = ATSPlatformSpec.from_dict(spec_dict)
             if spec.validate() is not None:
                 return False, ""
-            data = self.get_json(spec.api_url_template.format(slug=slug))
+            data = self.get_json(spec.render_api_url(slug))
             jobs = extract_generic_jobs(
                 data,
                 spec,
@@ -612,7 +678,7 @@ class CuratorAgent(BaseAgent):
             return False
 
         try:
-            data = self.get_json(spec.api_url_template.format(slug=sample_slug))
+            data = self.get_json(spec.render_api_url(sample_slug))
         except Exception:
             return False
 
@@ -664,7 +730,10 @@ class CuratorAgent(BaseAgent):
         for spec_dict in curation_state["ats_platforms"].values():
             for key in ("api_url_template", "url_template"):
                 tmpl = str((spec_dict or {}).get(key) or "").replace("{slug}", "x").replace("{id}", "1")
-                host = urllib.parse.urlsplit(tmpl).hostname
+                try:
+                    host = urllib.parse.urlsplit(tmpl).hostname
+                except ValueError:
+                    continue
                 if host:
                     domains.add(registrable_domain(host))
         return domains
@@ -814,7 +883,7 @@ class CuratorAgent(BaseAgent):
             for slug in cluster.slug_candidates[:4]:
                 company = cluster.slug_company[slug]
                 try:
-                    data = self.get_json(spec.api_url_template.format(slug=slug))
+                    data = self.get_json(spec.render_api_url(slug))
                 except Exception:
                     continue
                 if extract_generic_jobs(data, spec, slug, company, _probe_job):

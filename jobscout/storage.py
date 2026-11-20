@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,18 @@ _SENSITIVE_DRAFT_FIELDS = frozenset({
 })
 
 
+def _safe_json_loads(raw: Any, default: Any) -> Any:
+    if not raw:
+        return type(default)(default)
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, type(default)):
+            return parsed
+    except Exception:
+        pass
+    return type(default)(default)
+
+
 def log(msg: str) -> None:
     from datetime import datetime
 
@@ -51,6 +64,7 @@ class Storage:
         self.config = config
         self.home = config.home_dir
         self._db_ready = False
+        self._db_lock = threading.Lock()
 
     def ensure_dirs(self) -> None:
         ensure_private_dir(self.home)
@@ -118,64 +132,68 @@ class Storage:
 
     def _connect(self) -> sqlite3.Connection:
         self.ensure_dirs()
-        conn = sqlite3.connect(self.config.scout_db_path)
+        conn = sqlite3.connect(self.config.scout_db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
         if not self._db_ready:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS seen (
-                    id TEXT PRIMARY KEY,
-                    first_seen TEXT NOT NULL
-                );
+            with self._db_lock:
+                if not self._db_ready:
+                    conn.execute("PRAGMA journal_mode = WAL")
+                    conn.executescript(
+                        """
+                        CREATE TABLE IF NOT EXISTS seen (
+                            id TEXT PRIMARY KEY,
+                            first_seen TEXT NOT NULL
+                        );
 
-                CREATE TABLE IF NOT EXISTS opportunities (
-                    id TEXT PRIMARY KEY,
-                    source TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    company TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    location TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    text TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    discovered_at TEXT NOT NULL
-                );
+                        CREATE TABLE IF NOT EXISTS opportunities (
+                            id TEXT PRIMARY KEY,
+                            source TEXT NOT NULL,
+                            kind TEXT NOT NULL,
+                            company TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            location TEXT NOT NULL,
+                            url TEXT NOT NULL,
+                            text TEXT NOT NULL,
+                            metadata_json TEXT NOT NULL,
+                            discovered_at TEXT NOT NULL
+                        );
 
-                CREATE TABLE IF NOT EXISTS rankings (
-                    opportunity_id TEXT PRIMARY KEY,
-                    heuristic_score INTEGER NOT NULL,
-                    llm_score INTEGER,
-                    final_score REAL NOT NULL,
-                    verdict TEXT NOT NULL,
-                    matched_keywords_json TEXT NOT NULL,
-                    strengths_json TEXT NOT NULL,
-                    gaps_json TEXT NOT NULL,
-                    recommended_angle TEXT NOT NULL,
-                    eval_mode TEXT NOT NULL,
-                    ranked_at TEXT NOT NULL,
-                    resume_id TEXT NOT NULL DEFAULT '',
-                    resume_label TEXT NOT NULL DEFAULT '',
-                    tailored_resume_path TEXT NOT NULL DEFAULT '',
-                    FOREIGN KEY (opportunity_id) REFERENCES opportunities(id)
-                );
+                        CREATE TABLE IF NOT EXISTS rankings (
+                            opportunity_id TEXT PRIMARY KEY,
+                            heuristic_score INTEGER NOT NULL,
+                            llm_score INTEGER,
+                            final_score REAL NOT NULL,
+                            verdict TEXT NOT NULL,
+                            matched_keywords_json TEXT NOT NULL,
+                            strengths_json TEXT NOT NULL,
+                            gaps_json TEXT NOT NULL,
+                            recommended_angle TEXT NOT NULL,
+                            eval_mode TEXT NOT NULL,
+                            ranked_at TEXT NOT NULL,
+                            resume_id TEXT NOT NULL DEFAULT '',
+                            resume_label TEXT NOT NULL DEFAULT '',
+                            tailored_resume_path TEXT NOT NULL DEFAULT '',
+                            FOREIGN KEY (opportunity_id) REFERENCES opportunities(id)
+                        );
 
-                CREATE TABLE IF NOT EXISTS applications (
-                    job_id TEXT PRIMARY KEY,
-                    company TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    ats TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    draft_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                """
-            )
-            cols = {row["name"] for row in conn.execute("PRAGMA table_info(rankings)").fetchall()}
-            if "tailored_resume_path" not in cols:
-                conn.execute("ALTER TABLE rankings ADD COLUMN tailored_resume_path TEXT NOT NULL DEFAULT ''")
-            harden_file_permissions(self.config.scout_db_path)
-            self._db_ready = True
+                        CREATE TABLE IF NOT EXISTS applications (
+                            job_id TEXT PRIMARY KEY,
+                            company TEXT NOT NULL,
+                            title TEXT NOT NULL,
+                            url TEXT NOT NULL,
+                            ats TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            draft_json TEXT NOT NULL,
+                            updated_at TEXT NOT NULL
+                        );
+                        """
+                    )
+                    cols = {row["name"] for row in conn.execute("PRAGMA table_info(rankings)").fetchall()}
+                    if "tailored_resume_path" not in cols:
+                        conn.execute("ALTER TABLE rankings ADD COLUMN tailored_resume_path TEXT NOT NULL DEFAULT ''")
+                    harden_file_permissions(self.config.scout_db_path)
+                    self._db_ready = True
         return conn
 
     def get_ranked_ids(self) -> set[str]:
@@ -307,6 +325,8 @@ class Storage:
         include_skipped: bool = False,
         kind: str | None = None,
     ) -> list[RankedOpportunity]:
+        if limit <= 0:
+            return []
         clauses = ["r.final_score >= ?"]
         params: list[Any] = [min_score]
         if not include_skipped:
@@ -445,7 +465,7 @@ class Storage:
                 entry["aborted"] += 1
 
         for row in rows:
-            meta = json.loads(row["metadata_json"] or "{}")
+            meta = _safe_json_loads(row["metadata_json"], {})
             src = row["source"] or ""
             if row["kind"] == "job" and src not in {"remotive", "remoteok", "manual", "news"}:
                 _bump(metrics["boards"], row["company"] or "", row)
@@ -486,7 +506,7 @@ class Storage:
             ).fetchall()
             to_delete: list[str] = []
             for row in rows:
-                meta = json.loads(row["metadata_json"] or "{}")
+                meta = _safe_json_loads(row["metadata_json"], {})
                 comp_l = (row["company"] or "").strip().lower()
                 feed_ref = str(meta.get("feed_url") or meta.get("feed") or "").strip()
                 is_bad = (
@@ -518,9 +538,9 @@ class Storage:
             llm_score=row["llm_score"],
             final_score=row["final_score"],
             verdict=row["verdict"],
-            matched_keywords=json.loads(row["matched_keywords_json"]),
-            strengths=json.loads(row["strengths_json"]),
-            gaps=json.loads(row["gaps_json"]),
+            matched_keywords=_safe_json_loads(row["matched_keywords_json"], []),
+            strengths=_safe_json_loads(row["strengths_json"], []),
+            gaps=_safe_json_loads(row["gaps_json"], []),
             recommended_angle=row["recommended_angle"],
             eval_mode=row["eval_mode"],
             ranked_at=row["ranked_at"],
@@ -540,6 +560,6 @@ class Storage:
             location=row["location"],
             url=row["url"],
             text=row["text"],
-            metadata=json.loads(row["metadata_json"] or "{}"),
+            metadata=_safe_json_loads(row["metadata_json"], {}),
             discovered_at=row["discovered_at"],
         )

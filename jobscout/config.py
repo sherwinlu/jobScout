@@ -49,6 +49,23 @@ def _resolve_path(raw: str | Path | None, base_dir: Path) -> Path | None:
     return p if p.is_absolute() else (base_dir / p)
 
 
+def _require_dict(value: Any, label: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object, got {type(value).__name__}")
+    return value
+
+
+def _safe_regex_search(pattern: str, text: str) -> bool:
+    if not pattern:
+        return False
+    try:
+        return bool(re.search(pattern, text, re.I))
+    except re.error:
+        return bool(re.search(re.escape(pattern), text, re.I))
+
+
 # Voluntary self-identification categories ApplierAgent can fill from candidate.eeo_defaults.
 EEO_CATEGORIES = (
     "gender", "race_ethnicity", "hispanic_latino", "veteran_status", "disability_status", "sexual_orientation",
@@ -163,8 +180,8 @@ class TargetingConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TargetingConfig":
-        flt = data.get("filters") or {}
-        search = data.get("job_search") or {}
+        flt = _require_dict(data.get("filters"), "targeting.filters")
+        search = _require_dict(data.get("job_search"), "targeting.job_search")
         sources = {
             "remotive": False,
             "remoteok": False,
@@ -174,10 +191,10 @@ class TargetingConfig:
             "usajobs": False,
             "arbeitnow": False,
         }
-        sources.update({str(k): bool(v) for k, v in (data.get("sources") or {}).items()})
+        sources.update({str(k): bool(v) for k, v in _require_dict(data.get("sources"), "targeting.sources").items()})
 
         manual = {"greenhouse": [], "lever": [], "ashby": []}
-        for ats, slugs in (data.get("manual_targets") or {}).items():
+        for ats, slugs in _require_dict(data.get("manual_targets"), "targeting.manual_targets").items():
             if ats in manual and isinstance(slugs, list):
                 manual[ats] = [str(s).strip() for s in slugs if is_valid_ats_slug(str(s))]
 
@@ -480,14 +497,14 @@ class ScoutConfig:
         return self._select_best_profile(self.cover_letters, title, text)
     def title_excluded(self, title: str) -> bool:
         t = (title or "").strip()
-        return bool(t) and any(re.search(pat, t, re.I) for pat in self.targeting.title_exclude)
+        return bool(t) and any(_safe_regex_search(pat, t) for pat in self.targeting.title_exclude)
 
     def title_has_target_terms(self, title: str) -> bool:
         t = (title or "").strip()
         if not t:
             return False
         return not self.targeting.title_must_match_all or all(
-            re.search(pat, t, re.I) for pat in self.targeting.title_must_match_all
+            _safe_regex_search(pat, t) for pat in self.targeting.title_must_match_all
         )
 
     def title_matches(self, title: str) -> bool:
@@ -505,12 +522,12 @@ class ScoutConfig:
         allowed = self.targeting.allowed_locations
         if not allowed or "*" in allowed or "any" in [a.lower() for a in allowed]:
             return True
-        return any(re.search(pat, loc, re.I) for pat in allowed)
+        return any(_safe_regex_search(pat, loc) for pat in allowed)
 
     def domain_matches(self, text: str) -> bool:
         if not self.targeting.domain_keywords:
             return False
-        return any(re.search(pat, text or "", re.I) for pat in self.targeting.domain_keywords)
+        return any(_safe_regex_search(pat, text or "") for pat in self.targeting.domain_keywords)
 
     @staticmethod
     def is_news_signal(text: str) -> bool:
@@ -591,21 +608,29 @@ def load_config(
     p_path = _resolve_profile_path(resolved_home, profile_path)
     raw_profile: dict[str, Any] = {}
     if p_path and p_path.exists():
-        raw_profile = json.loads(p_path.read_text(encoding="utf-8"))
+        loaded = json.loads(p_path.read_text(encoding="utf-8"))
+        raw_profile = _require_dict(loaded, f"profile ({p_path})")
         base_dir = p_path.parent
     else:
         base_dir = resolved_home
 
     override_resume = Path(resume_path).expanduser() if resume_path else None
+    raw_resumes = raw_profile.get("resumes")
+    if raw_resumes is not None and not isinstance(raw_resumes, list):
+        raise ValueError(f"resumes must be a JSON array, got {type(raw_resumes).__name__}")
+    raw_cover_letters = raw_profile.get("cover_letters")
+    if raw_cover_letters is not None and not isinstance(raw_cover_letters, list):
+        raise ValueError(f"cover_letters must be a JSON array, got {type(raw_cover_letters).__name__}")
+
     resumes = _load_documents(
-        raw_profile.get("resumes") or [],
+        raw_resumes or [],
         base_dir,
         override_path=override_resume,
         default_id="default",
         fallback_default_md=True,
     )
     cover_letters = _load_documents(
-        raw_profile.get("cover_letters") or [],
+        raw_cover_letters or [],
         base_dir,
         default_id="default_cl",
         fallback_default_md=False,
@@ -613,12 +638,12 @@ def load_config(
 
     return ScoutConfig(
         home_dir=resolved_home,
-        candidate=CandidateConfig.from_dict(raw_profile.get("candidate") or {}),
-        targeting=TargetingConfig.from_dict(raw_profile.get("targeting") or {}),
-        llm=LLMConfig.from_dict(raw_profile.get("llm") or {}),
-        applier=ApplierConfig.from_dict(raw_profile.get("applier") or {}),
-        politeness=PolitenessConfig.from_dict(raw_profile.get("politeness") or {}),
-        curation=CurationConfig.from_dict(raw_profile.get("curation") or {}),
+        candidate=CandidateConfig.from_dict(_require_dict(raw_profile.get("candidate"), "candidate")),
+        targeting=TargetingConfig.from_dict(_require_dict(raw_profile.get("targeting"), "targeting")),
+        llm=LLMConfig.from_dict(_require_dict(raw_profile.get("llm"), "llm")),
+        applier=ApplierConfig.from_dict(_require_dict(raw_profile.get("applier"), "applier")),
+        politeness=PolitenessConfig.from_dict(_require_dict(raw_profile.get("politeness"), "politeness")),
+        curation=CurationConfig.from_dict(_require_dict(raw_profile.get("curation"), "curation")),
         resumes=resumes,
         cover_letters=cover_letters,
         profile_path=p_path,
